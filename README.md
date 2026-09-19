@@ -1,4 +1,7 @@
 # ComfyUI Native Quantizer
+**Make large ComfyUI models smaller without leaving ComfyUI's native quantization ecosystem.**
+
+Architecture-aware native quantization for ComfyUI diffusion models and text encoders, with mixed W4A8/W4A4/INT8/FP8 support, streaming conversion, validation, and native runtime compatibility.
 
 Convert compatible ComfyUI checkpoints and text encoders to ComfyUI's native
 quantized safetensors formats. The converter is self-contained, streams large
