@@ -147,8 +147,3 @@ test_quantizer_native.py     regression tests
 architecture_template.json   data-only policy template
 requirements-optional.txt    optional dependencies
 ```
-
-## License
-
-No license is asserted by this repository yet. Add the license that matches the
-intended distribution before publishing a release.
