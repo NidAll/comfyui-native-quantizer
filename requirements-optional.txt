@@ -1,0 +1,7 @@
+# Keep the PyTorch build supplied by your ComfyUI environment.
+numpy
+safetensors
+# Optional: remote safetensors downloads.
+huggingface-hub
+# Optional: NVFP4 / MXFP8 layout serializers (tested with 0.2.33).
+comfy-kitchen>=0.2.33

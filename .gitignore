@@ -1,0 +1,26 @@
+# Local Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Local reports, logs, and conversion outputs
+*.log
+validation_report.json
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+
+# Preserve the previous local version without publishing it
+comfyui_wxa8_quantizer.py
+README_quantizer.md
+README_quantizer_legacy.md
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/

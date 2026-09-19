@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "family": "custom_transformer",
+  "component": "diffusion",
+  "comfyui_classes": [],
+  "detect_primary": [],
+  "quantize": [
+    "(^|\\.)(blocks|layers|transformer_blocks)\\.\\d+\\..*(to_q|to_k|to_v|q_proj|k_proj|v_proj|o_proj|up_proj|down_proj|gate_proj|fc1|fc2)\\.weight$"
+  ],
+  "keep": [
+    "(^|\\.)(embed_tokens|lm_head|norm|patch_embed|final_layer)(\\.|$)"
+  ],
+  "exclude": [],
+  "min_weight_numel": 4096,
+  "notes": "Edit patterns using --inspect output. Requires a compatible ComfyUI architecture loader."
+}
