@@ -4597,8 +4597,8 @@ TEXT_LLM_QUANTIZE = (
 )
 
 TEXT_YUE2_QUANTIZE = (
-    r"^model\.layers\.\d+\.self_attn\.(qkv_proj|o_proj)\.weight$",
-    r"^model\.layers\.\d+\.mlp\.(gate_up_proj|down_proj)\.weight$",
+    r"(^|\.)model\.layers\.\d+\.self_attn\.(qkv_proj|o_proj)\.weight$",
+    r"(^|\.)model\.layers\.\d+\.mlp\.(gate_up_proj|down_proj)\.weight$",
 )
 
 TEXT_JINA_CLIP2_QUANTIZE = (
