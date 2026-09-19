@@ -4103,17 +4103,71 @@ _register(FamilyPolicy(
 _register(FamilyPolicy(
     family="ace_step",
     comfyui_classes=("ACEStep", "ACEStep15"),
-    detect_primary=("genre_embedder.weight",),
-    detect_hints=("encoder.lyric_encoder.layers.0.input_layernorm.weight",
-                  "decoder.layers.0.self_attn.q_proj.weight"),
-    quantize=(
-        r"(encoder|decoder)\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.weight$",
-        r"(encoder|decoder)\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight$",
+
+    # ACE-Step 1.5 / XL native ComfyUI layout.
+    # Legacy ACE-Step detection is still handled by the structural detector.
+    detect_primary=(
+        "encoder.lyric_encoder.layers.0.input_layernorm.weight",
     ),
-    keep=(r"(^|\.)(genre_embedder|speaker_embedder|lyric_proj|ssl_|enc|dec)\.",),
-    exclude=UNIVERSAL_EXCLUDE,
+    detect_hints=(
+        "decoder.layers.0.self_attn.q_proj.weight",
+        "decoder.layers.0.cross_attn.q_proj.weight",
+        "decoder.layers.0.mlp.gate_proj.weight",
+        "genre_embedder.weight",
+    ),
+
+    quantize=(
+        # ACE-Step 1.5 / XL main DiT.
+        r"decoder\.layers\.\d+\.(self_attn|cross_attn)\."
+        r"(q_proj|k_proj|v_proj|o_proj)\.weight$",
+
+        r"decoder\.layers\.\d+\.mlp\."
+        r"(gate_proj|up_proj|down_proj)\.weight$",
+
+        # Internal lyric + timbre conditioning transformers.
+        r"encoder\.(lyric_encoder|timbre_encoder)\.layers\.\d+\.self_attn\."
+        r"(q_proj|k_proj|v_proj|o_proj)\.weight$",
+
+        r"encoder\.(lyric_encoder|timbre_encoder)\.layers\.\d+\.mlp\."
+        r"(gate_proj|up_proj|down_proj)\.weight$",
+
+        # Legacy ACE-Step encoder layout.
+        r"encoder\.layers\.\d+\.self_attn\."
+        r"(q_proj|k_proj|v_proj|o_proj)\.weight$",
+
+        r"encoder\.layers\.\d+\.mlp\."
+        r"(gate_proj|up_proj|down_proj)\.weight$",
+    ),
+
+    keep=(
+        # Legacy ACE-Step sensitive paths.
+        r"(^|\.)(genre_embedder|speaker_embedder|lyric_proj|ssl_|enc|dec)\.",
+
+        # ACE-Step 1.5 conditioning/projector layers.
+        r"^encoder\.(text_projector|"
+        r"lyric_encoder\.embed_tokens|"
+        r"timbre_encoder\.embed_tokens)(\.|$)",
+
+        # Input/output/time projections.
+        r"^decoder\.(proj_in|proj_out|condition_embedder|"
+        r"time_embed|time_embed_r)(\.|$)",
+
+        # Keep the audio-code path untouched initially.
+        r"^(tokenizer|detokenizer)(\.|$)",
+    ),
+
+    # IMPORTANT:
+    # UNIVERSAL_EXCLUDE contains encoder/decoder subtree exclusions,
+    # which would suppress the ACE-Step 1.5 transformer itself.
+    # This policy is already a narrow allow-list, so no broad exclude is needed.
+    exclude=(),
+
     runtime_status="experimental",
-    notes="ACE-Step music diffusion (audio).",
+    notes=(
+        "ACE-Step / ACE-Step 1.5 music diffusion. Supports the native "
+        "ComfyUI ACE-Step 1.5 Base/Turbo/XL layout, including decoder "
+        "self-attention, cross-attention, gated MLPs, and lyric/timbre encoders."
+    ),
 ))
 
 _register(FamilyPolicy(
@@ -4943,10 +4997,33 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
         candidates.append(("ltxv", ["adaln_single.emb.timestep_embedder.linear_1.bias"],
                            [s for s in ("transformer_blocks.0.attn2.to_k.weight",
                                         "audio_adaln_single.linear.weight") if has(s)]))
-    # 12. ace-step
-    if has("genre_embedder.weight"):
-        candidates.append(("ace_step", ["genre_embedder.weight"],
-                           [s for s in ("encoder.lyric_encoder.layers.0.input_layernorm.weight",) if has(s)]))
+    # 12. ACE-Step / ACE-Step 1.5
+    if has(
+        "encoder.lyric_encoder.layers.0.input_layernorm.weight",
+        "decoder.layers.0.self_attn.q_proj.weight",
+    ):
+        candidates.append((
+            "ace_step",
+            [
+                "encoder.lyric_encoder.layers.0.input_layernorm.weight",
+                "decoder.layers.0.self_attn.q_proj.weight",
+            ],
+            [
+                s for s in (
+                    "decoder.layers.0.cross_attn.q_proj.weight",
+                    "decoder.layers.0.mlp.gate_proj.weight",
+                )
+                if has(s)
+            ],
+        ))
+
+    # Legacy ACE-Step
+    elif has("genre_embedder.weight"):
+        candidates.append((
+            "ace_step",
+            ["genre_embedder.weight"],
+            [],
+        ))
     # 13. pixart
     if has("t_block.1.weight"):
         candidates.append(("pixart", ["t_block.1.weight"],
