@@ -136,8 +136,6 @@ metadata.
 - Memory limits control temporary conversion work, not total process RSS.
 - Output publication is atomic and output validation runs before the final path
   is made visible.
-- ComfyUI core is never edited for this project. New integrations belong in a
-  dedicated `ComfyUI/custom_nodes/<name>/` directory.
 
 ## Project layout
 
