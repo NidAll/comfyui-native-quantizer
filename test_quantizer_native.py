@@ -99,7 +99,10 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(q.build_arg_parser().parse_args(['--format', alias]).format, canonical)
 
     def test_text_embedding_opt_in_and_lookup(self):
-        from comfy_kitchen.tensor import TensorWiseINT8Layout
+        try:
+            from comfy_kitchen.tensor import TensorWiseINT8Layout
+        except ImportError:
+            self.skipTest('comfy-kitchen not installed')
         embedding = 'model.embed_tokens.weight'
         projection = 'model.layers.0.self_attn.q_proj.weight'
         weights = {
@@ -157,6 +160,72 @@ class NativeTests(unittest.TestCase):
                                                None, [], [], [], None, None)
                 self.assertEqual(next(d.kind for d in decisions if d.name == target),
                                  q.DecisionKind.QUANTIZE)
+
+    def test_ace_step15_policy(self):
+        targets = [
+            *(f'decoder.layers.0.{attention}.{projection}.weight'
+              for attention in ('self_attn', 'cross_attn')
+              for projection in ('q_proj', 'k_proj', 'v_proj', 'o_proj')),
+            *(f'decoder.layers.0.mlp.{projection}.weight'
+              for projection in ('gate_proj', 'up_proj', 'down_proj')),
+            *(f'encoder.{tower}_encoder.layers.0.{block}.{projection}.weight'
+              for tower in ('lyric', 'timbre')
+              for block, projection in (('self_attn', 'q_proj'), ('mlp', 'gate_proj'))),
+        ]
+        kept = [
+            'encoder.text_projector.weight',
+            'encoder.lyric_encoder.embed_tokens.weight',
+            'encoder.timbre_encoder.embed_tokens.weight',
+            'decoder.proj_in.weight', 'decoder.proj_out.weight',
+            'decoder.time_embed.0.weight', 'decoder.time_embed_r.0.weight',
+            'tokenizer.layers.0.proj.weight',
+            'detokenizer.layers.0.proj.weight',
+        ]
+        marker = 'encoder.lyric_encoder.layers.0.input_layernorm.weight'
+        info = q._ckpt([(marker, (64,)), *((name, (64, 256)) for name in targets + kept)])
+        detected = q.detect_architecture(info)
+        self.assertEqual(detected.architecture, 'ace_step')
+        self.assertIn(marker, detected.evidence)
+        self.assertIn('decoder.layers.0.self_attn.q_proj.weight', detected.evidence)
+        self.assertIn('decoder.layers.0.cross_attn.q_proj.weight', detected.hints)
+        self.assertIn('decoder.layers.0.mlp.gate_proj.weight', detected.hints)
+        decisions = {d.name: d.kind for d in q.classify_tensors(
+            info, detected, q.FORMAT_MIXED, None, [], [], [], None, None)}
+        for name in targets:
+            with self.subTest(target=name):
+                self.assertEqual(decisions[name], q.DecisionKind.QUANTIZE)
+        for name in kept:
+            with self.subTest(keep=name):
+                self.assertEqual(decisions[name], q.DecisionKind.KEEP_PRECISION)
+
+        legacy = q._ckpt([
+            ('genre_embedder.weight', (64, 256)),
+            ('encoder.layers.0.self_attn.q_proj.weight', (64, 256)),
+            ('encoder.layers.0.mlp.gate_proj.weight', (64, 256)),
+            ('lyric_proj.weight', (64, 256)),
+        ])
+        legacy_detection = q.detect_architecture(legacy)
+        self.assertEqual(legacy_detection.architecture, 'ace_step')
+        legacy_decisions = {d.name: d.kind for d in q.classify_tensors(
+            legacy, legacy_detection, q.FORMAT_MIXED, None, [], [], [], None, None)}
+        self.assertEqual(legacy_decisions['encoder.layers.0.self_attn.q_proj.weight'],
+                         q.DecisionKind.QUANTIZE)
+        self.assertEqual(legacy_decisions['encoder.layers.0.mlp.gate_proj.weight'],
+                         q.DecisionKind.QUANTIZE)
+        self.assertEqual(legacy_decisions['lyric_proj.weight'], q.DecisionKind.KEEP_PRECISION)
+
+    def test_qwen_image21_fails_closed(self):
+        info = q._ckpt([
+            ('norm_out.linear.weight', (64, 256)),
+            ('modulation.1.weight', (64, 256)),
+            ('transformer_blocks.0.attn.to_q.weight', (64, 256)),
+        ])
+        detected = q.detect_architecture(info)
+        self.assertEqual(detected.architecture, 'qwen_image21')
+        self.assertEqual(detected.policy.runtime_status, 'unsupported')
+        decisions = q.classify_tensors(info, detected, q.FORMAT_MIXED,
+                                       None, [], [], [], None, None)
+        self.assertFalse(any(d.kind == q.DecisionKind.QUANTIZE for d in decisions))
 
     def test_mixed_embedding_uses_int8_only(self):
         embedding = 'model.embed_tokens.weight'
@@ -290,6 +359,10 @@ class NativeTests(unittest.TestCase):
                 self.convert('int8', flag)
 
     def test_hf_pinned_download(self):
+        try:
+            import huggingface_hub
+        except ImportError:
+            self.skipTest('huggingface-hub not installed')
         import types
         calls = []
         args = q.build_arg_parser().parse_args(['--hf-repo', 'owner/model', '--hf-subfolder', 'transformer'])

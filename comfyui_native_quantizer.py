@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""ComfyUI checkpoint quantizer 2.1.
+"""ComfyUI checkpoint quantizer 2.2.0.
 
 Single-file distribution. Native formats: W4A8, mixed W4A8/W4A4/INT8,
 INT8, ConvRot W4A4, scaled FP8 E4M3/E5M2, NVFP4 and MXFP8. Includes
@@ -58,7 +58,7 @@ except Exception as _exc:  # pragma: no cover - import guard
 
 CONVERTER_NAME = "comfyui_native_quantizer"
 
-_CONVERTER_VERSION = "2.1.0"
+_CONVERTER_VERSION = "2.2.0"
 
 
 def get_converter_version() -> str:
@@ -68,7 +68,6 @@ def get_converter_version() -> str:
     set_converter_version) so that plan-hash/resume checks observe changes;
     the self-tests temporarily mutate it to prove version drift is rejected.
     """
-# SPDX-License-Identifier: Apache-2.0
     return _CONVERTER_VERSION
 
 
@@ -191,7 +190,6 @@ TRITON_MIN_VERSION = (3, 7)
 
 class QuantizerError(Exception):
     """Base class for all converter errors."""
-# SPDX-License-Identifier: Apache-2.0
 
 class UsageError(QuantizerError):
     """Bad CLI usage."""
@@ -1977,7 +1975,6 @@ GOLDEN_W4 = GOLDEN["w4a8_default"]
 
 def parse_size(text: str) -> int:
     """Parse a size like 2G, 512M, 1024K or a plain byte count."""
-# SPDX-License-Identifier: Apache-2.0
     m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGTP]?B?)?\s*", text, re.I)
     if not m:
         raise UsageError(f"invalid size {text!r}")
@@ -2181,7 +2178,6 @@ FLOAT_DTYPES = {torch.float32, torch.float16, torch.bfloat16, torch.float64}
 
 class JsonLogHandler(logging.Handler):
     """Emit each record as one JSON line (optional --json-log)."""
-# SPDX-License-Identifier: Apache-2.0
 
     def __init__(self, path: str):
         super().__init__()
@@ -2283,7 +2279,6 @@ def torch_dtype_from_safe(name: str) -> torch.dtype:
 @dataclass
 class TensorMeta:
     """Header-level information about one tensor (no data loaded)."""
-# SPDX-License-Identifier: Apache-2.0
     name: str
     dtype: torch.dtype
     shape: Tuple[int, ...]
@@ -3132,7 +3127,6 @@ def _is_power_of_four(value: int) -> bool:
 
 def build_hadamard(size: int, device: Any = "cpu", dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """Normalized REGULAR orthogonal Hadamard matrix (ConvRot), size = power of 4."""
-# SPDX-License-Identifier: Apache-2.0
     dev = torch.device(device) if not isinstance(device, torch.device) else device
     key = (size, dev, dtype)
     cached = _HADAMARD_CACHE.get(key)
@@ -4439,6 +4433,17 @@ _register(FamilyPolicy(
 ))
 
 _register(FamilyPolicy(
+    family="qwen_image21",
+    comfyui_classes=("QwenImage21",),
+    detect_primary=("norm_out.linear.weight", "modulation.1.weight"),
+    detect_hints=("transformer_blocks.0.attn.to_q.weight",),
+    quantize=(r"(?!)",), keep=(), exclude=UNIVERSAL_EXCLUDE,
+    runtime_status="unsupported",
+    notes="QwenImage21 has a distinct transformer layout; no quantization "
+          "policy has been validated for it yet.",
+))
+
+_register(FamilyPolicy(
     family="ideogram4",
     comfyui_classes=("Ideogram4",),
     detect_primary=("embed_image_indicator.weight",),
@@ -4876,7 +4881,6 @@ def _match_signatures(keys: Iterable[str], prefix: str,
                       signatures: Sequence[str]) -> List[str]:
     """Return the signature keys that appear as substrings of some state-dict key
     (with the unet prefix stripped)."""
-# SPDX-License-Identifier: Apache-2.0
     stripped = [k[len(prefix):] if k.startswith(prefix) else k for k in keys]
     found = []
     for sig in signatures:
@@ -5105,7 +5109,13 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
                 and po_shape is not None and len(po_shape) == 1 and po_shape[0] == 128):
             candidates.append(("mage_flow", ["txt_norm.weight", "proj_out.weight"],
                                [s for s in ("transformer_blocks.0.img_attn.qkv.weight",) if has(s)]))
-    # 25. qwen image
+    # 25. qwen image 2.1 (distinct layout; fail closed until validated)
+    if has("norm_out.linear.weight", "modulation.1.weight"):
+        candidates.append(("qwen_image21",
+                           ["norm_out.linear.weight", "modulation.1.weight"],
+                           [s for s in ("transformer_blocks.0.attn.to_q.weight",)
+                            if has(s)]))
+    # 26. qwen image
     if has("txt_norm.weight") and has("proj_out.weight") and not any(c[0] == "mage_flow" for c in candidates):
         candidates.append(("qwen_image", ["txt_norm.weight", "proj_out.weight"],
                            [s for s in ("img_in.weight", "transformer_blocks.0.attn.to_q.weight",
@@ -5288,10 +5298,9 @@ class EnvironmentInfo:
 
 @dataclass(frozen=True)
 class RuntimeCertificate:
-    """Runtime certificate produced by tools/runtime_certify.py on the
-    target inference machine: which formats actually loaded and executed,
+    """Runtime certificate from the target inference machine: which formats
+    actually loaded and executed,
     with the observed effective W4A4 activation precision."""
-# SPDX-License-Identifier: Apache-2.0
     backend: str
     gpu: Optional[str]
     cuda_capability: Optional[Tuple[int, int]]
@@ -5301,9 +5310,8 @@ class RuntimeCertificate:
 def load_runtime_certificate(path: str) -> RuntimeCertificate:
     """Parse and validate a runtime certificate JSON file.
 
-    The certificate is produced by tools/runtime_certify.py (a companion
-    script that MAY import comfy-kitchen; the converter itself stays
-    standalone)."""
+    The certificate must record actual load and forward execution on the
+    target inference backend; capability detection alone is insufficient."""
     try:
         payload = _load_json_object(path, "runtime certificate", nofollow=True)
     except Exception as e:
@@ -5353,7 +5361,7 @@ def _check_runtime_certificate(cert: RuntimeCertificate,
         raise RuntimeCompatibilityError(
             f"runtime certificate is for backend {cert.backend!r} but the "
             f"target runtime is {runtime.target!r}; regenerate the "
-            "certificate with tools/runtime_certify.py on the target machine")
+            "certificate on the target inference machine")
     if (runtime.cuda_capability is not None
             and cert.cuda_capability is not None
             and cert.cuda_capability != runtime.cuda_capability):
@@ -5465,7 +5473,7 @@ class FormatRuntimeCapability:
     accelerated: None = not proven, True/False = expected accelerated /
                  expected fallback from static analysis.
     certified: True only after a real runtime probe executed the format
-               (tools/runtime_certify.py on the target machine).
+               on the target inference machine.
     """
     loadable: Optional[bool]
     executable: Optional[bool]
@@ -5610,7 +5618,7 @@ def runtime_capabilities_for(
     executes int4 activations regardless of linear_dtype.
 
     Nothing here is runtime-certified; certification comes from
-    tools/runtime_certify.py via --runtime-certificate.
+    a real target-runtime probe supplied via --runtime-certificate.
     """
     gpu_name = env.cuda_device if env is not None else None
     cuda_cap = env.cuda_capability if env is not None else None
@@ -5739,7 +5747,6 @@ def classify_tensors(info: CheckpointInfo, detection: DetectionResult,
     BERT checkpoints. ``all`` additionally finds recognized text towers outside
     an explicitly prefixed diffusion model.
     """
-# SPDX-License-Identifier: Apache-2.0
     if components not in COMPONENT_CHOICES:
         raise PolicyError(
             f"unknown component selection {components!r}; "
@@ -6531,7 +6538,6 @@ def _quantize_rotated_w4a8_with_codebook(weight: torch.Tensor, group_size: int,
                                          als_iterations: int = W4A8_ALS_ITERS,
                                          ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """W4A8 quantization of a rotated weight chunk with a PRE-FIT codebook."""
-# SPDX-License-Identifier: Apache-2.0
     if weight.ndim != 2:
         raise PolicyError(
             f"rotated W4A8 weight must be 2D, got {tuple(weight.shape)}")
@@ -6947,7 +6953,6 @@ class MixedPlanner:
     passes. Quality and compression gates are HARD: a plan that cannot meet
     them raises QualityGateError / CompressionGateError instead of silently
     publishing a checkpoint that misses its targets."""
-# SPDX-License-Identifier: Apache-2.0
 
     def __init__(self, profile_name: str,
                  calibration: Optional[CalibrationStats],
@@ -7636,7 +7641,6 @@ def hash_checkpoint_files(info: CheckpointInfo, *, refresh: bool = False) -> Dic
 
 def _portable_file_labels(paths: Sequence[str]) -> List[str]:
     """Stable, non-secret file labels for metadata embedded in moved models."""
-# SPDX-License-Identifier: Apache-2.0
     basenames = [Path(path).name for path in paths]
     if len(set(basenames)) == len(basenames):
         return basenames
@@ -8245,7 +8249,6 @@ class ConversionEngine:
 
 def build_quant_metadata(info: CheckpointInfo, plan: ConversionPlan) -> Dict[str, Any]:
     """Official `_quantization_metadata` payload: {"layers": {layer: conf}}."""
-# SPDX-License-Identifier: Apache-2.0
     layers: Dict[str, Any] = {}
     for d in plan.quantized_layers():
         if d.layer is None:
@@ -8558,7 +8561,6 @@ def compression_stats(info: CheckpointInfo, plan: ConversionPlan,
     precision; the bucket counts show whether ConvRot-256, K%16 shape rules,
     small tensors, sensitivity analysis, or user filters caused it.
     """
-# SPDX-License-Identifier: Apache-2.0
     prefix = detection.unet_prefix
     if not any(k.startswith(prefix) for k in info.key_set()):
         prefix = ""
@@ -9730,7 +9732,6 @@ def _fmt_display(fmt: Optional[str]) -> Optional[str]:
 def plan_from_output(output_path: str, detection: DetectionResult,
                      fmt: str, info: Optional[CheckpointInfo] = None) -> ConversionPlan:
     """Reconstruct a minimal plan from an existing output checkpoint (validation-only)."""
-# SPDX-License-Identifier: Apache-2.0
     with safe_open(output_path, framework="pt") as st:
         names = list(st.keys())
         meta = st.metadata() or {}
@@ -10123,7 +10124,6 @@ def _tmpdir(prefix: str = "wxa8_selftest") -> str:
 
 def _make_mini_checkpoint(path: str, seed: int = 0) -> None:
     """SDXL-shaped mini model: a few linears under model.diffusion_model."""
-# SPDX-License-Identifier: Apache-2.0
     torch.manual_seed(seed)
     sd = {
         "model.diffusion_model.input_blocks.0.0.weight": torch.randn(320, 4, 3, 3) * 0.1,
@@ -10815,6 +10815,22 @@ def _test_text_encoder_quantization() -> str:
         assert all(d.component == COMPONENT_TEXT_ENCODER for d in decisions)
     return ("Qwen and embedded text towers classify in W4A8; T5/CLIP/BERT "
             "classify in mixed mode")
+
+
+def _test_ace_step15_policy() -> str:
+    marker = "encoder.lyric_encoder.layers.0.input_layernorm.weight"
+    target = "decoder.layers.0.cross_attn.q_proj.weight"
+    kept = "decoder.proj_out.weight"
+    info = _ckpt([(marker, (64,)), (target, (64, 256)),
+                  (kept, (64, 256)),
+                  ("decoder.layers.0.self_attn.q_proj.weight", (64, 256))])
+    detection = detect_architecture(info)
+    assert detection.architecture == "ace_step"
+    decisions = {d.name: d.kind for d in classify_tensors(
+        info, detection, FORMAT_MIXED, None, [], [], [], None, None)}
+    assert decisions[target] == DecisionKind.QUANTIZE
+    assert decisions[kept] == DecisionKind.KEEP_PRECISION
+    return "ACE-Step 1.5 detection, transformer target and output preservation"
 
 
 def _test_minimax_music3_quantization() -> str:
@@ -12534,7 +12550,7 @@ def _test_mixed_cert_seq() -> str:
         info, shape_lookup=lambda nm: (info.by_name(nm).shape
                                        if info.by_name(nm) else None))
     dec = classify_tensors(info, det, FORMAT_MIXED, None, [], [], [], None, None)
-    # certificate covering ONLY W4A8 (v1 schema, produced by runtime_certify)
+    # certificate covering ONLY W4A8 (v1 schema)
     cert = RuntimeCertificate(
         backend="nvidia", gpu="selftest-gpu", cuda_capability=(8, 9),
         rocm_arch=None,
@@ -12950,6 +12966,7 @@ SELF_TEST_CASES: List[Tuple[str, Callable[[], str]]] = [
             ("golden-vectors-vs-reference", _test_golden_vectors),
             ("fast-codebook-assignment", _test_fast_codebook_assignment),
             ("text-encoder-quantization", _test_text_encoder_quantization),
+            ("ace-step15-policy", _test_ace_step15_policy),
             ("minimax-music3-quantization", _test_minimax_music3_quantization),
             ("malformed-checkpoints", _test_malformed),
             ("checkpoint-input-variants", _test_checkpoint_variants),
@@ -13010,8 +13027,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="target inference runtime used for format eligibility; "
                         "auto probes torch (CUDA/ROCm/CPU)")
     p.add_argument("--runtime-certificate", metavar="PATH", default=None,
-                   help="mixed mode: JSON certificate produced by "
-                        "tools/runtime_certify.py on the target inference "
+                   help="mixed mode: JSON certificate from actual native "
+                        "load and forward probes on the target inference "
                         "machine; overrides static W4A4 dispatch guesses with "
                         "observed behavior")
     p.add_argument("--require-runtime-certificate", action="store_true",
@@ -13616,8 +13633,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.require_runtime_certificate and certificate is None:
             raise RuntimeCompatibilityError(
                 "--require-runtime-certificate needs --runtime-certificate "
-                "(produce it with tools/runtime_certify.py on the target "
-                "inference machine)")
+                "(supply a certificate from real native execution on the "
+                "target inference machine)")
         mixed_plan = mixed_planner.plan(info, decisions)
         args._runtime_gpu_name = runtime_caps.gpu_name
         _check_runtime_compatibility(env, mixed_planner, decisions, warnings)

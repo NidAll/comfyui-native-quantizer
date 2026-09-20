@@ -1,6 +1,9 @@
 # ComfyUI Native Quantizer
 **Make large ComfyUI models smaller without leaving ComfyUI's native quantization ecosystem.**
 
+Make large ComfyUI models smaller without leaving ComfyUI's native
+quantization ecosystem.
+
 Convert compatible ComfyUI checkpoints and text encoders to ComfyUI's native
 quantized safetensors formats. The converter is self-contained, streams large
 files, preserves unsupported tensors, and validates its output before publishing
@@ -57,11 +60,16 @@ Comfy-kitchen also contains AWQ W4A16 and SVDQuant W4A4 layouts. They are not
 registered as native loadable algorithms by stock ComfyUI, so this project does
 not emit them.
 
+## Architecture support
+
+Built-in policies cover a broad range of ComfyUI diffusion, video, audio, and
+text-encoder architectures, including experimental native ACE-Step 1.5 support,
+Flux-family models, MiniMax, LTXV/LTXAV, YuE2, Trellis2, Qwen text encoders,
+T5, and CLIP. Run `--list-architectures` for the authoritative current list.
+
 ## Text encoders
 
-Built-in policies cover decoder-only LLM text encoders, T5/UMT5, T5Gemma,
-CLIP, JinaCLIP2, BERT, Qwen3.5 hybrid attention, and YuE2. Diffusion policies
-are included for Trellis2, SenseNova U1.5, and YuE2. Use:
+Use `--components text_encoder` to select a text-encoder checkpoint:
 
 ```bash
 python comfyui_native_quantizer.py text_encoder.safetensors \
@@ -91,14 +99,13 @@ precision.
 Use the Python environment that contains the ComfyUI PyTorch build:
 
 ```bash
-python -m pip install numpy safetensors
+python -m pip install -r requirements.txt
 ```
 
 Optional features:
 
 ```bash
-python -m pip install huggingface-hub
-python -m pip install comfy-kitchen
+python -m pip install -r requirements-optional.txt
 ```
 
 The converter accepts local safetensors files, indexed shards, model
@@ -128,6 +135,10 @@ overrides. A custom policy is data-only and does not install a model loader;
 the target ComfyUI architecture must already understand the tensor names and
 metadata.
 
+`--runtime-certificate` accepts a JSON certificate from observed native load
+and forward execution on the target backend. Static capability checks alone do
+not qualify as certification.
+
 ## Design boundaries
 
 - Conversion is local and deterministic for the same backend, options, and input.
@@ -144,5 +155,7 @@ metadata.
 comfyui_native_quantizer.py  converter
 test_quantizer_native.py     regression tests
 architecture_template.json   data-only policy template
+requirements.txt             required dependencies (except PyTorch)
 requirements-optional.txt    optional dependencies
+LICENSE                      Apache License 2.0
 ```
