@@ -1,9 +1,6 @@
 # ComfyUI Native Quantizer
 **Make large ComfyUI models smaller without leaving ComfyUI's native quantization ecosystem.**
 
-Make large ComfyUI models smaller without leaving ComfyUI's native
-quantization ecosystem.
-
 Convert compatible ComfyUI checkpoints and text encoders to ComfyUI's native
 quantized safetensors formats. The converter is self-contained, streams large
 files, preserves unsupported tensors, and validates its output before publishing
