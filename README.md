@@ -62,7 +62,9 @@ not emit them.
 Built-in policies cover a broad range of ComfyUI diffusion, video, audio, and
 text-encoder architectures, including experimental native ACE-Step 1.5 support,
 Flux-family models, MiniMax, LTXV/LTXAV, YuE2, Trellis2, Qwen text encoders,
-T5, and CLIP. Run `--list-architectures` for the authoritative current list.
+T5, and CLIP. Qwen-Image 2.1 has an experimental native policy; see the
+[format guide](docs/qwen-image-2.1.md). Run `--list-architectures` for the
+authoritative current list.
 
 ## Text encoders
 

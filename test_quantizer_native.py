@@ -214,18 +214,135 @@ class NativeTests(unittest.TestCase):
                          q.DecisionKind.QUANTIZE)
         self.assertEqual(legacy_decisions['lyric_proj.weight'], q.DecisionKind.KEEP_PRECISION)
 
-    def test_qwen_image21_fails_closed(self):
-        info = q._ckpt([
-            ('norm_out.linear.weight', (64, 256)),
+    def test_qwen_image21_policy(self):
+        marker = [
+            ('txt_in.text_norm.weight', (256,)),
             ('modulation.1.weight', (64, 256)),
-            ('transformer_blocks.0.attn.to_q.weight', (64, 256)),
+            ('transformer_blocks.0.attn.norm_q.weight', (64,)),
+            ('img_in.weight', (64, 256)),
+            ('proj_out.weight', (64, 256)),
+        ]
+        attention = [f'transformer_blocks.0.attn.{name}.weight'
+                     for name in ('to_q', 'to_k', 'to_v', 'to_out.0')]
+        sensitive = [
+            'txt_in.in_layer.weight', 'txt_in.out_layer.weight',
+            'time_text_embed.timestep_embedder.linear_1.weight',
+            'time_text_embed.timestep_embedder.linear_2.weight',
+            'norm_out.linear.weight',
+            'transformer_blocks.0.attn.norm_k.weight',
+        ]
+        for mlp in (('gate_layer', 'proj', 'out'), ('gate_up', 'out')):
+            with self.subTest(mlp=mlp):
+                targets = attention + [f'transformer_blocks.0.img_mlp.{name}.weight'
+                                       for name in mlp]
+                info = q._ckpt(marker + [(name, (64, 256))
+                                         for name in targets + sensitive])
+                detected = q.detect_architecture(info)
+                self.assertEqual(detected.architecture, 'qwen_image21')
+                self.assertEqual(detected.confidence, 'high')
+                self.assertEqual(detected.policy.runtime_status, 'experimental')
+                for fmt in (q.FORMAT_W4A8, q.FORMAT_MIXED):
+                    decisions = {d.name: d.kind for d in q.classify_tensors(
+                        info, detected, fmt, None, [], [], [], None, None)}
+                    for name in targets:
+                        self.assertEqual(decisions[name], q.DecisionKind.QUANTIZE, (fmt, name))
+                    for name in sensitive + [name for name, _ in marker]:
+                        self.assertNotEqual(decisions[name], q.DecisionKind.QUANTIZE,
+                                            (fmt, name))
+
+        incomplete = q._ckpt([('modulation.1.weight', (64, 256)),
+                              ('transformer_blocks.0.attn.to_q.weight', (64, 256))])
+        with self.assertRaises(q.UnknownArchitectureError):
+            q.detect_architecture(incomplete)
+
+        prefixed = q._ckpt([(f'model.diffusion_model.{name}', shape)
+                            for name, shape in marker] + [
+            ('model.diffusion_model.transformer_blocks.0.attn.to_q.weight', (64, 256)),
+            ('model.diffusion_model.transformer_blocks.0.img_mlp.proj.weight', (64, 256)),
+        ])
+        prefixed_detection = q.detect_architecture(prefixed)
+        self.assertEqual(prefixed_detection.architecture, 'qwen_image21')
+        prefixed_decisions = {d.name: d.kind for d in q.classify_tensors(
+            prefixed, prefixed_detection, q.FORMAT_MIXED,
+            None, [], [], [], None, None)}
+        self.assertEqual(prefixed_decisions[
+            'model.diffusion_model.transformer_blocks.0.img_mlp.proj.weight'],
+            q.DecisionKind.QUANTIZE)
+
+    def test_qwen_image21_native_output(self):
+        weights = {
+            'txt_in.text_norm.weight': torch.ones(256),
+            'modulation.1.weight': self.w.clone(),
+            'transformer_blocks.0.attn.norm_q.weight': torch.ones(64),
+            'img_in.weight': self.w.clone(),
+            'proj_out.weight': self.w.clone(),
+            'transformer_blocks.0.attn.to_q.weight': self.w.clone(),
+            'transformer_blocks.0.img_mlp.proj.weight': self.w.clone(),
+            'norm_out.linear.weight': self.w.clone(),
+        }
+        safetensors.torch.save_file(weights, str(self.src))
+        for fmt, algorithm in (('int8-convrot', q.FORMAT_INT8),
+                               ('w4a8', q.FORMAT_W4A8)):
+            with self.subTest(format=fmt):
+                out = self.convert(fmt)
+                sd, meta = self.load(out)
+                layers = json.loads(meta['_quantization_metadata'])['layers']
+                for layer in ('transformer_blocks.0.attn.to_q',
+                              'transformer_blocks.0.img_mlp.proj'):
+                    self.assertEqual(layers[layer]['format'], algorithm)
+                    if fmt == 'int8-convrot':
+                        self.assertTrue(layers[layer]['convrot'])
+                for name in ('modulation.1.weight', 'img_in.weight', 'proj_out.weight',
+                             'norm_out.linear.weight'):
+                    self.assertTrue(torch.equal(sd[name], weights[name]))
+                if fmt == 'int8-convrot':
+                    self.assertTrue(q.verify_native_output(str(out))['ok'])
+
+    def test_qwen_image21_text_encoder_policy(self):
+        info = q._ckpt([
+            ('model.layers.0.self_attn.q_proj.weight', (64, 256)),
+            ('model.layers.0.mlp.gate_proj.weight', (64, 256)),
+            ('model.embed_tokens.weight', (64, 256)),
+            ('visual.blocks.0.attn.qkv.weight', (64, 256)),
         ])
         detected = q.detect_architecture(info)
-        self.assertEqual(detected.architecture, 'qwen_image21')
-        self.assertEqual(detected.policy.runtime_status, 'unsupported')
-        decisions = q.classify_tensors(info, detected, q.FORMAT_MIXED,
-                                       None, [], [], [], None, None)
-        self.assertFalse(any(d.kind == q.DecisionKind.QUANTIZE for d in decisions))
+        self.assertEqual(detected.architecture, 'text_encoder_llm')
+        decisions = {d.name: d.kind for d in q.classify_tensors(
+            info, detected, q.FORMAT_MIXED, None, [], [], [], None, None)}
+        self.assertEqual(decisions['model.layers.0.self_attn.q_proj.weight'],
+                         q.DecisionKind.QUANTIZE)
+        self.assertEqual(decisions['model.layers.0.mlp.gate_proj.weight'],
+                         q.DecisionKind.QUANTIZE)
+        self.assertNotEqual(decisions['model.embed_tokens.weight'], q.DecisionKind.QUANTIZE)
+        self.assertNotEqual(decisions['visual.blocks.0.attn.qkv.weight'],
+                            q.DecisionKind.QUANTIZE)
+
+    def test_qwen_image21_format_dry_runs(self):
+        weights = {
+            'txt_in.text_norm.weight': torch.ones(256),
+            'modulation.1.weight': self.w.clone(),
+            'transformer_blocks.0.attn.norm_q.weight': torch.ones(64),
+            'img_in.weight': self.w.clone(),
+            'proj_out.weight': self.w.clone(),
+            'transformer_blocks.0.attn.to_q.weight': self.w.clone(),
+            'transformer_blocks.0.img_mlp.proj.weight': self.w.clone(),
+        }
+        safetensors.torch.save_file(weights, str(self.src))
+        formats = ('int8', 'int8-convrot', 'w4a4', 'int4-convrot',
+                   'w4a8', 'mixed', 'fp8-e4m3', 'fp8-e5m2',
+                   'nvfp4', 'mxfp8', 'fp16', 'bf16')
+        for fmt in formats:
+            with self.subTest(format=fmt):
+                args = [str(self.src), '--format', fmt, '--output',
+                        str(self.p / f'{fmt}.safetensors'), '--dry-run',
+                        '--progress', 'off']
+                if fmt == 'mixed':
+                    args += ['--experimental', '--target-runtime', 'cpu']
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(q.main(args), 0)
+                self.assertIn('qwen_image21', output.getvalue())
+                if fmt in q.NATIVE_FORMATS and fmt not in ('fp16', 'bf16'):
+                    self.assertIn('candidate layers: 2', output.getvalue())
 
     def test_mixed_embedding_uses_int8_only(self):
         embedding = 'model.embed_tokens.weight'

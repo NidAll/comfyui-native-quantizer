@@ -4435,12 +4435,24 @@ _register(FamilyPolicy(
 _register(FamilyPolicy(
     family="qwen_image21",
     comfyui_classes=("QwenImage21",),
-    detect_primary=("norm_out.linear.weight", "modulation.1.weight"),
-    detect_hints=("transformer_blocks.0.attn.to_q.weight",),
-    quantize=(r"(?!)",), keep=(), exclude=UNIVERSAL_EXCLUDE,
-    runtime_status="unsupported",
-    notes="QwenImage21 has a distinct transformer layout; no quantization "
-          "policy has been validated for it yet.",
+    # Detection requires the combined signature below, not one isolated key.
+    detect_primary=(),
+    detect_hints=("img_in.weight", "proj_out.weight",
+                  "transformer_blocks.0.attn.to_q.weight",
+                  "transformer_blocks.0.img_mlp.proj.weight",
+                  "transformer_blocks.0.img_mlp.gate_up.weight"),
+    quantize=(
+        r"transformer_blocks\.\d+\.attn\.(to_q|to_k|to_v|to_out\.0)\.weight$",
+        r"transformer_blocks\.\d+\.img_mlp\."
+        r"(gate_up|gate_layer|proj|out)\.weight$",
+    ),
+    keep=(r"^(img_in|txt_in|time_text_embed|modulation|norm_out|proj_out)(\.|$)",
+          r"^transformer_blocks\.\d+\.attn\.norm_(q|k)(\.|$)"),
+    exclude=UNIVERSAL_EXCLUDE,
+    runtime_status="experimental",
+    notes="Qwen-Image 2.1 single-stream DiT; block attention and fused or "
+          "unfused SwiGLU linears only. Keep inputs, shared modulation, "
+          "normalization, timestep projection, and output at source precision.",
 ))
 
 _register(FamilyPolicy(
@@ -5109,11 +5121,19 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
                 and po_shape is not None and len(po_shape) == 1 and po_shape[0] == 128):
             candidates.append(("mage_flow", ["txt_norm.weight", "proj_out.weight"],
                                [s for s in ("transformer_blocks.0.img_attn.qkv.weight",) if has(s)]))
-    # 25. qwen image 2.1 (distinct layout; fail closed until validated)
-    if has("norm_out.linear.weight", "modulation.1.weight"):
+    # 25. qwen image 2.1 (match ComfyUI's distinctive shared-modulation layout)
+    if (has("txt_in.text_norm.weight", "modulation.1.weight",
+            "transformer_blocks.0.attn.norm_q.weight", "img_in.weight",
+            "proj_out.weight")
+            and any_of("transformer_blocks.0.img_mlp.gate_up.weight",
+                       "transformer_blocks.0.img_mlp.proj.weight")):
         candidates.append(("qwen_image21",
-                           ["norm_out.linear.weight", "modulation.1.weight"],
-                           [s for s in ("transformer_blocks.0.attn.to_q.weight",)
+                           ["txt_in.text_norm.weight", "modulation.1.weight",
+                            "transformer_blocks.0.attn.norm_q.weight"],
+                           [s for s in ("img_in.weight", "proj_out.weight",
+                                        "transformer_blocks.0.attn.to_q.weight",
+                                        "transformer_blocks.0.img_mlp.gate_up.weight",
+                                        "transformer_blocks.0.img_mlp.proj.weight")
                             if has(s)]))
     # 26. qwen image
     if has("txt_norm.weight") and has("proj_out.weight") and not any(c[0] == "mage_flow" for c in candidates):
@@ -10833,6 +10853,26 @@ def _test_ace_step15_policy() -> str:
     return "ACE-Step 1.5 detection, transformer target and output preservation"
 
 
+def _test_qwen_image21_policy() -> str:
+    info = _ckpt([
+        ("txt_in.text_norm.weight", (256,)),
+        ("modulation.1.weight", (64, 256)),
+        ("transformer_blocks.0.attn.norm_q.weight", (64,)),
+        ("img_in.weight", (64, 256)),
+        ("proj_out.weight", (64, 256)),
+        ("transformer_blocks.0.attn.to_q.weight", (64, 256)),
+        ("transformer_blocks.0.img_mlp.gate_up.weight", (64, 256)),
+    ])
+    detection = detect_architecture(info)
+    assert detection.architecture == "qwen_image21"
+    decisions = {d.name: d.kind for d in classify_tensors(
+        info, detection, FORMAT_MIXED, None, [], [], [], None, None)}
+    assert decisions["transformer_blocks.0.attn.to_q.weight"] == DecisionKind.QUANTIZE
+    assert decisions["transformer_blocks.0.img_mlp.gate_up.weight"] == DecisionKind.QUANTIZE
+    assert decisions["modulation.1.weight"] == DecisionKind.KEEP_PRECISION
+    return "Qwen-Image 2.1 fused MLP and attention selected; modulation retained"
+
+
 def _test_minimax_music3_quantization() -> str:
     """MiniMax Music 3 DiT and both text-encoder layouts auto-detect and
     expose exactly the reference transformer/RVQ linears to W4A8 and mixed."""
@@ -12967,6 +13007,7 @@ SELF_TEST_CASES: List[Tuple[str, Callable[[], str]]] = [
             ("fast-codebook-assignment", _test_fast_codebook_assignment),
             ("text-encoder-quantization", _test_text_encoder_quantization),
             ("ace-step15-policy", _test_ace_step15_policy),
+            ("qwen-image21-policy", _test_qwen_image21_policy),
             ("minimax-music3-quantization", _test_minimax_music3_quantization),
             ("malformed-checkpoints", _test_malformed),
             ("checkpoint-input-variants", _test_checkpoint_variants),
