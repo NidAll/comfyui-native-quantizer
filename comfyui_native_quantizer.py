@@ -4246,6 +4246,32 @@ _register(FamilyPolicy(
 ))
 
 _register(FamilyPolicy(
+    family="ming_image",
+    comfyui_classes=("MingImage",),
+    # Design-Layer carries this marker; unmarked Design uses the same block
+    # signature without the learned pad token used by Z-Image.
+    detect_primary=(),
+    detect_hints=("__ming_image__", "x_embedder.weight",
+                  "layers.0.attention.to_q.weight",
+                  "layers.0.feed_forward.w1.weight"),
+    quantize=(
+        r"^(layers|context_refiner|noise_refiner)\.\d+\.attention\."
+        r"(to_q|to_k|to_v|to_out\.0)\.weight$",
+        r"^(layers|context_refiner|noise_refiner)\.\d+\.feed_forward\."
+        r"(w1|w2|w3)\.weight$",
+    ),
+    keep=(r"^(x_embedder|t_embedder|cap_embedder|final_layer|"
+          r"all_x_embedder|all_final_layer|siglip_embedder)(\.|$)",
+          r"(^|\.)(adaLN_modulation|attention_norm\d*|ffn_norm\d*|"
+          r"norm_[qk])(\.|$)"),
+    exclude=UNIVERSAL_EXCLUDE,
+    runtime_status="experimental",
+    notes="ComfyUI Ming-Image Design and Design-Layer repacks; block attention "
+          "and feed-forward linears only. Uses the Ming marker or the "
+          "unmarked Design signature without Z-Image pad tokens.",
+))
+
+_register(FamilyPolicy(
     family="pixeldit",
     comfyui_classes=("PixelDiTT2I", "PiD"),
     detect_primary=("core.pixel_embedder.proj.weight", "lq_proj.latent_proj.0.weight"),
@@ -4744,6 +4770,35 @@ _register(FamilyPolicy(
 ))
 
 _register(FamilyPolicy(
+    family="ming_image_text_encoder",
+    comfyui_classes=("MingImageTEModel", "MingImageEncoder"),
+    detect_primary=(),
+    detect_hints=("thinker.norm.weight", "thinker.layers.0.attention.query_key_value.weight",
+                  "connector.layers.0.self_attn.q_proj.weight", "tokenizer_json"),
+    quantize=(
+        r"^thinker\.layers\.\d+\.attention\."
+        r"(query_key_value|dense)\.weight$",
+        r"^thinker\.layers\.\d+\.mlp\."
+        r"(gate_up_proj|gate_proj|up_proj|down_proj)\.weight$",
+        r"^thinker\.layers\.\d+\.mlp\.shared_experts\."
+        r"(gate_up_proj|gate_proj|up_proj|down_proj)\.weight$",
+        r"^connector\.layers\.\d+\.self_attn\."
+        r"(q_proj|k_proj|v_proj|o_proj)\.weight$",
+        r"^connector\.layers\.\d+\.mlp\."
+        r"(gate_up_proj|gate_proj|up_proj|down_proj)\.weight$",
+    ),
+    keep=(r"^(thinker\.embed_tokens|thinker\.norm|vision|linear_proj|"
+          r"query_tokens|proj_in|proj_out|proj_directvlm|connector\.norm)(\.|$)",
+          r"^thinker\.layers\.\d+\.mlp\.(gate|image_gate|experts)(\.|$)"),
+    exclude=TEXT_ENCODER_EXCLUDE,
+    runtime_status="experimental",
+    notes="ComfyUI Ming-Image Ling Mini conditioner. Quantizes dense thinker "
+          "and connector linears; keeps vision, embeddings, MoE routing and "
+          "expert banks, norms, and output projections at source precision.",
+    component=COMPONENT_TEXT_ENCODER,
+))
+
+_register(FamilyPolicy(
     family="text_encoder_llm",
     comfyui_classes=("QwenTextEncoder", "LlamaTextEncoder", "GemmaTextEncoder"),
     detect_primary=("layers.0.self_attn.q_proj.weight",),
@@ -4942,6 +4997,15 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
                            ["encoder.layers.0.pre_self_attn_layernorm.weight"],
                            ["encoder.layers.0.self_attn.q_proj.weight"]
                            if has("encoder.layers.0.self_attn.q_proj.weight") else []))
+    if has("thinker.norm.weight",
+           "thinker.layers.0.attention.query_key_value.weight",
+           "connector.layers.0.self_attn.q_proj.weight", "proj_out.weight"):
+        candidates.append(("ming_image_text_encoder",
+                           ["thinker.norm.weight",
+                            "thinker.layers.0.attention.query_key_value.weight",
+                            "connector.layers.0.self_attn.q_proj.weight"],
+                           [s for s in ("tokenizer_json", "vision.patch_embed.proj.weight",
+                                        "thinker.layers.0.mlp.gate_up_proj.weight") if has(s)]))
 
     # 1. mmdit (SD3 / SD3.5)
     if has("joint_blocks.0.context_block.attn.qkv.weight", "x_embedder.proj.weight"):
@@ -5059,6 +5123,18 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
         candidates.append(("pixeldit", ["core.pixel_embedder.proj.weight"],
                            [s for s in ("cap_embedder.1.weight", "noise_refiner.0.attention.k_norm.weight") if has(s)]))
     # 16. lumina2 / zimage
+    if (has("x_embedder.weight", "cap_embedder.1.weight",
+            "layers.0.attention.to_q.weight", "layers.0.feed_forward.w1.weight")
+            and (has("__ming_image__") or
+                 not any_of("cap_pad_token", "dec_net.cond_embed.weight"))):
+        candidates.append(("ming_image",
+                           (["__ming_image__"] if has("__ming_image__") else []) +
+                           ["x_embedder.weight",
+                            "cap_embedder.1.weight",
+                            "layers.0.attention.to_q.weight",
+                            "layers.0.feed_forward.w1.weight"],
+                           [s for s in ("context_refiner.0.attention.to_q.weight",
+                                        "noise_refiner.0.attention.to_q.weight") if has(s)]))
     if has("cap_embedder.1.weight") and has("noise_refiner.0.attention.k_norm.weight"):
         candidates.append(("lumina2", ["cap_embedder.1.weight"],
                            [s for s in ("layers.0.attn.qkv.weight", "cap_pad_token",
@@ -10873,6 +10949,49 @@ def _test_qwen_image21_policy() -> str:
     return "Qwen-Image 2.1 fused MLP and attention selected; modulation retained"
 
 
+def _test_ming_image_policy() -> str:
+    diffusion = _ckpt([
+        ("__ming_image__", (0,)),
+        ("x_embedder.weight", (64, 256)),
+        ("cap_embedder.1.weight", (64, 256)),
+        ("layers.0.attention.to_q.weight", (64, 256)),
+        ("layers.0.feed_forward.w1.weight", (64, 256)),
+        ("context_refiner.0.attention.to_out.0.weight", (64, 256)),
+        ("noise_refiner.0.feed_forward.w3.weight", (64, 256)),
+        ("layers.0.adaLN_modulation.0.weight", (64, 256)),
+    ])
+    det = detect_architecture(diffusion)
+    assert det.architecture == "ming_image"
+    decisions = {d.name: d.kind for d in classify_tensors(
+        diffusion, det, FORMAT_MIXED, None, [], [], [], None, None)}
+    for name in ("layers.0.attention.to_q.weight",
+                 "layers.0.feed_forward.w1.weight",
+                 "context_refiner.0.attention.to_out.0.weight",
+                 "noise_refiner.0.feed_forward.w3.weight"):
+        assert decisions[name] == DecisionKind.QUANTIZE, name
+    assert decisions["layers.0.adaLN_modulation.0.weight"] != DecisionKind.QUANTIZE
+
+    text = _ckpt([
+        ("thinker.norm.weight", (64,)),
+        ("thinker.layers.0.attention.query_key_value.weight", (64, 256)),
+        ("connector.layers.0.self_attn.q_proj.weight", (64, 256)),
+        ("proj_out.weight", (64, 256)),
+        ("thinker.layers.1.mlp.shared_experts.down_proj.weight", (64, 256)),
+        ("thinker.layers.1.mlp.experts.down_proj.weight", (256, 64, 256)),
+        ("vision.blocks.0.attn.qkv.weight", (64, 256)),
+    ])
+    det = detect_architecture(text)
+    assert det.architecture == "ming_image_text_encoder"
+    decisions = {d.name: d.kind for d in classify_tensors(
+        text, det, FORMAT_MIXED, None, [], [], [], None, None)}
+    assert decisions["thinker.layers.0.attention.query_key_value.weight"] == DecisionKind.QUANTIZE
+    assert decisions["connector.layers.0.self_attn.q_proj.weight"] == DecisionKind.QUANTIZE
+    assert decisions["thinker.layers.1.mlp.shared_experts.down_proj.weight"] == DecisionKind.QUANTIZE
+    assert decisions["thinker.layers.1.mlp.experts.down_proj.weight"] != DecisionKind.QUANTIZE
+    assert decisions["vision.blocks.0.attn.qkv.weight"] != DecisionKind.QUANTIZE
+    return "Ming diffusion and text policies select dense linears and preserve sensitive weights"
+
+
 def _test_minimax_music3_quantization() -> str:
     """MiniMax Music 3 DiT and both text-encoder layouts auto-detect and
     expose exactly the reference transformer/RVQ linears to W4A8 and mixed."""
@@ -13008,6 +13127,7 @@ SELF_TEST_CASES: List[Tuple[str, Callable[[], str]]] = [
             ("text-encoder-quantization", _test_text_encoder_quantization),
             ("ace-step15-policy", _test_ace_step15_policy),
             ("qwen-image21-policy", _test_qwen_image21_policy),
+            ("ming-image-policy", _test_ming_image_policy),
             ("minimax-music3-quantization", _test_minimax_music3_quantization),
             ("malformed-checkpoints", _test_malformed),
             ("checkpoint-input-variants", _test_checkpoint_variants),

@@ -298,6 +298,115 @@ class NativeTests(unittest.TestCase):
                 if fmt == 'int8-convrot':
                     self.assertTrue(q.verify_native_output(str(out))['ok'])
 
+    def test_ming_image_diffusion_policy_and_native_output(self):
+        weights = {
+            '__ming_image__': torch.empty(0),
+            'x_embedder.weight': self.w.clone(),
+            'cap_embedder.1.weight': self.w.clone(),
+            'layers.0.attention.to_q.weight': self.w.clone(),
+            'layers.0.attention.to_out.0.weight': self.w.clone(),
+            'layers.0.feed_forward.w1.weight': self.w.clone(),
+            'context_refiner.0.attention.to_k.weight': self.w.clone(),
+            'noise_refiner.0.feed_forward.w3.weight': self.w.clone(),
+            'layers.0.adaLN_modulation.0.weight': self.w.clone(),
+            'all_final_layer.2-1.linear.weight': self.w.clone(),
+        }
+        safetensors.torch.save_file(weights, str(self.src))
+        info = q.discover_checkpoint(str(self.src))
+        detected = q.detect_architecture(info)
+        self.assertEqual(detected.architecture, 'ming_image')
+        for fmt in ('int8-convrot', 'w4a8'):
+            with self.subTest(format=fmt):
+                out = self.convert(fmt)
+                sd, meta = self.load(out)
+                layers = json.loads(meta['_quantization_metadata'])['layers']
+                for layer in ('layers.0.attention.to_q', 'layers.0.attention.to_out.0',
+                              'layers.0.feed_forward.w1', 'context_refiner.0.attention.to_k',
+                              'noise_refiner.0.feed_forward.w3'):
+                    self.assertEqual(layers[layer]['format'],
+                                     q.FORMAT_INT8 if fmt == 'int8-convrot'
+                                     else q.FORMAT_W4A8)
+                for name in ('x_embedder.weight', 'cap_embedder.1.weight',
+                             'layers.0.adaLN_modulation.0.weight',
+                             'all_final_layer.2-1.linear.weight'):
+                    self.assertTrue(torch.equal(sd[name], weights[name]))
+                if fmt == 'int8-convrot':
+                    self.assertTrue(q.verify_native_output(str(out))['ok'])
+
+        incomplete = q._ckpt([
+            ('__ming_image__', (0,)),
+            ('layers.0.attention.to_q.weight', (64, 256)),
+        ])
+        with self.assertRaises(q.UnknownArchitectureError):
+            q.detect_architecture(incomplete)
+
+        unmarked = q._ckpt([(name, tuple(tensor.shape)) for name, tensor
+                            in weights.items() if name != '__ming_image__'])
+        self.assertEqual(q.detect_architecture(unmarked).architecture, 'ming_image')
+        z_image = q._ckpt([(name, tuple(tensor.shape)) for name, tensor
+                           in weights.items() if name != '__ming_image__'] +
+                          [('cap_pad_token', (32, 64))])
+        with self.assertRaises(q.UnknownArchitectureError):
+            q.detect_architecture(z_image)
+
+    def test_ming_image_text_encoder_policy_and_native_output(self):
+        weights = {
+            'thinker.norm.weight': torch.ones(64),
+            'thinker.layers.0.attention.query_key_value.weight': self.w.clone(),
+            'thinker.layers.0.mlp.gate_proj.weight': self.w.clone(),
+            'thinker.layers.1.mlp.shared_experts.down_proj.weight': self.w.clone(),
+            'thinker.layers.1.mlp.experts.down_proj.weight':
+                torch.randn(2, 64, 256),
+            'connector.layers.0.self_attn.q_proj.weight': self.w.clone(),
+            'connector.layers.0.mlp.gate_proj.weight': self.w.clone(),
+            'vision.blocks.0.attn.qkv.weight': self.w.clone(),
+            'thinker.embed_tokens.weight': self.w.clone(),
+            'proj_out.weight': self.w.clone(),
+            'tokenizer_json': torch.tensor([1, 2, 3], dtype=torch.uint8),
+        }
+        safetensors.torch.save_file(weights, str(self.src))
+        info = q.discover_checkpoint(str(self.src))
+        detected = q.detect_architecture(info)
+        self.assertEqual(detected.architecture, 'ming_image_text_encoder')
+        out = self.convert('int8-convrot', '--components', 'text_encoder')
+        sd, meta = self.load(out)
+        layers = json.loads(meta['_quantization_metadata'])['layers']
+        for layer in ('thinker.layers.0.attention.query_key_value',
+                      'thinker.layers.0.mlp.gate_proj',
+                      'thinker.layers.1.mlp.shared_experts.down_proj',
+                      'connector.layers.0.self_attn.q_proj',
+                      'connector.layers.0.mlp.gate_proj'):
+            self.assertEqual(layers[layer]['format'], q.FORMAT_INT8)
+        for name in ('thinker.layers.1.mlp.experts.down_proj.weight',
+                     'vision.blocks.0.attn.qkv.weight', 'thinker.embed_tokens.weight',
+                     'proj_out.weight', 'tokenizer_json'):
+            self.assertTrue(torch.equal(sd[name], weights[name]))
+        self.assertTrue(q.verify_native_output(str(out))['ok'])
+
+    def test_ming_image_format_dry_runs(self):
+        safetensors.torch.save_file({
+            '__ming_image__': torch.empty(0),
+            'x_embedder.weight': self.w.clone(),
+            'cap_embedder.1.weight': self.w.clone(),
+            'layers.0.attention.to_q.weight': self.w.clone(),
+            'layers.0.feed_forward.w1.weight': self.w.clone(),
+        }, str(self.src))
+        formats = ('int8', 'int8-convrot', 'w4a4', 'int4-convrot',
+                   'w4a8', 'mixed', 'fp8-e4m3', 'fp8-e5m2',
+                   'nvfp4', 'mxfp8', 'fp16', 'bf16')
+        for fmt in formats:
+            with self.subTest(format=fmt):
+                args = [str(self.src), '--format', fmt, '--output',
+                        str(self.p / f'{fmt}.safetensors'), '--dry-run',
+                        '--progress', 'off']
+                if fmt == 'mixed':
+                    args += ['--experimental', '--target-runtime', 'cpu']
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(q.main(args), 0)
+                self.assertIn('ming_image', output.getvalue())
+                if fmt in q.NATIVE_FORMATS and fmt not in ('fp16', 'bf16'):
+                    self.assertIn('candidate layers: 2', output.getvalue())
+
     def test_qwen_image21_text_encoder_policy(self):
         info = q._ckpt([
             ('model.layers.0.self_attn.q_proj.weight', (64, 256)),
