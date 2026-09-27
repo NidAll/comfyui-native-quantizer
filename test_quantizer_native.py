@@ -349,6 +349,41 @@ class NativeTests(unittest.TestCase):
         with self.assertRaises(q.UnknownArchitectureError):
             q.detect_architecture(z_image)
 
+    def test_ming_image_unmarked_patch_embedders(self):
+        # The native Design BF16 checkpoint has patch-indexed embedders and
+        # no __ming_image__ marker or plain x_embedder.weight.
+        weights = [
+            ('all_x_embedder.2-1.weight', (64, 256)),
+            ('all_final_layer.2-1.linear.weight', (64, 256)),
+            ('cap_embedder.1.weight', (64, 256)),
+            ('layers.0.attention.to_q.weight', (64, 256)),
+            ('layers.0.feed_forward.w1.weight', (64, 256)),
+            ('context_refiner.0.attention.to_k.weight', (64, 256)),
+            ('noise_refiner.0.feed_forward.w3.weight', (64, 256)),
+        ]
+        for prefix in ('', 'model.diffusion_model.'):
+            with self.subTest(prefix=prefix):
+                info = q._ckpt([(prefix + name, shape) for name, shape in weights])
+                detected = q.detect_architecture(info)
+                self.assertEqual(detected.architecture, 'ming_image')
+                decisions = {d.name: d.kind for d in q.classify_tensors(
+                    info, detected, q.FORMAT_MIXED, None, [], [], [], None, None)}
+                for name, _ in weights[:3]:
+                    self.assertNotEqual(decisions[prefix + name], q.DecisionKind.QUANTIZE)
+                for name, _ in weights[3:]:
+                    self.assertEqual(decisions[prefix + name], q.DecisionKind.QUANTIZE)
+
+        for missing in (weights[0][0], weights[1][0], weights[3][0], weights[4][0]):
+            with self.subTest(missing=missing), self.assertRaises(q.UnknownArchitectureError):
+                q.detect_architecture(q._ckpt([w for w in weights if w[0] != missing]))
+        for marker in ('cap_pad_token', 'dec_net.cond_embed.weight'):
+            with self.subTest(marker=marker):
+                try:
+                    detected = q.detect_architecture(q._ckpt(weights + [(marker, (64, 256))]))
+                except q.UnknownArchitectureError:
+                    continue
+                self.assertNotEqual(detected.architecture, 'ming_image')
+
     def test_ming_image_text_encoder_policy_and_native_output(self):
         weights = {
             'thinker.norm.weight': torch.ones(64),

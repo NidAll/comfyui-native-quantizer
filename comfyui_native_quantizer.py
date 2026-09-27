@@ -5122,15 +5122,20 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
     if has("core.pixel_embedder.proj.weight"):
         candidates.append(("pixeldit", ["core.pixel_embedder.proj.weight"],
                            [s for s in ("cap_embedder.1.weight", "noise_refiner.0.attention.k_norm.weight") if has(s)]))
-    # 16. lumina2 / zimage
-    if (has("x_embedder.weight", "cap_embedder.1.weight",
+    # 16. Ming / lumina2 / zimage. Native Ming Design can retain the
+    # patch-indexed input/output projections instead of x_embedder.weight.
+    ming_embedder_keys = ["x_embedder.weight"]
+    if not has(*ming_embedder_keys):
+        ming_embedder_keys = ["all_x_embedder.2-1.weight",
+                              "all_final_layer.2-1.linear.weight"]
+    if (has(*ming_embedder_keys, "cap_embedder.1.weight",
             "layers.0.attention.to_q.weight", "layers.0.feed_forward.w1.weight")
             and (has("__ming_image__") or
                  not any_of("cap_pad_token", "dec_net.cond_embed.weight"))):
         candidates.append(("ming_image",
                            (["__ming_image__"] if has("__ming_image__") else []) +
-                           ["x_embedder.weight",
-                            "cap_embedder.1.weight",
+                           ming_embedder_keys +
+                           ["cap_embedder.1.weight",
                             "layers.0.attention.to_q.weight",
                             "layers.0.feed_forward.w1.weight"],
                            [s for s in ("context_refiner.0.attention.to_q.weight",
