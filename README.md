@@ -2,7 +2,7 @@
 **Make large ComfyUI models smaller without leaving ComfyUI's native quantization ecosystem.**
 
 Convert compatible ComfyUI checkpoints and text encoders to ComfyUI's native
-quantized safetensors formats. The converter is self-contained, streams large
+quantized safetensors formats. The converter streams large
 files, preserves unsupported tensors, and validates its output before publishing
 it.
 
@@ -26,7 +26,7 @@ Preview detection and layer decisions first:
 ```bash
 python comfyui_native_quantizer.py model.safetensors --inspect
 python comfyui_native_quantizer.py model.safetensors \
-  --format mixed --experimental --dry-run
+  --format mixed --dry-run
 ```
 
 The input is never overwritten. Use `--overwrite` only when replacing an
@@ -41,7 +41,7 @@ existing output is intentional.
 | `w4a4` | `convrot_w4a4` | Packed 4-bit weights |
 | `int4-convrot` | `convrot_w4a4` | Packed 4-bit weights with an INT4 execution request |
 | `w4a8` | `asym_w4a8_int8` | 4-bit weights with INT8 activations |
-| `mixed` | Per-layer native formats | Quality-aware W4A8/W4A4/INT8 selection |
+| `mixed` | Per-layer native formats | Kitchen-aware W4A8/W4A4/INT8 selection |
 | `fp8-e4m3` | `float8_e4m3fn` | Tensor-scaled FP8 |
 | `fp8-e5m2` | `float8_e5m2` | Tensor-scaled FP8 |
 | `nvfp4` | `nvfp4` | Comfy-kitchen NVFP4 layout |
@@ -56,6 +56,11 @@ warning when the runtime capability is known.
 Comfy-kitchen also contains AWQ W4A16 and SVDQuant W4A4 layouts. They are not
 registered as native loadable algorithms by stock ComfyUI, so this project does
 not emit them.
+
+Mixed mode now budgets runtime weight expansion as well as storage and error.
+Use `--profile throughput` for more INT8 headroom, and `--kernel-costs` for
+shape-specific measured selection. See the [pipeline guide](docs/kitchen-pipeline.md)
+for calibration capture, layout contracts, validation and limits.
 
 ## Architecture support
 
