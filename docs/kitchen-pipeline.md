@@ -49,6 +49,7 @@ The pipeline now has these responsibilities:
 | --- | --- | --- |
 | INT8 | Row-major INT8 `[N,K]`, FP32 row scales | Direct INT8 linear, no weight rotation or nibble expansion |
 | W4A4 | Row-major signed INT8 `[N,K/2]`, even index in low nibble, FP32 row scales; quant group 64 | Native INT4 only on a compatible dispatch and `linear_dtype=int4`; otherwise packed GEMV or expansion into INT8 |
+| W6A8 | INT8 `[N,3K/4]`, FP8 E4M3 `[N,K/G]`, FP32 channel scales `[N]`; G defaults to 16, ConvRot 256 | Uniform six-bit codes decode onto INT8; mixed opt-in, possible decode workspace |
 | W4A8 | INT8 `[N,K/2]`, FP8 E4M3 group scales, FP32 channel scales and 16-entry codebook; group 16, ConvRot 256 | Small-M fused decode GEMV where available; otherwise INT8 decode workspace |
 
 Weights are rotated once offline. Removing the matching activation transform
@@ -149,3 +150,7 @@ runtime and does not claim to eliminate upstream allocations. Graph replay for
 fixed synthetic shapes does not establish graph safety across ComfyUI patching,
 dynamic shapes, lazy loading or offloading. Validate those with the actual model
 and workflow before deployment.
+
+W6A8 uses `kitchen-costs/v2` group-aware costs; v1 remains readable for previous
+formats. See [native W6A8](w6a8.md) for conversion and probe examples, dependency
+gates and the upstream odd-row CUDA graph limitation.

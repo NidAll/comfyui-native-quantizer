@@ -7,6 +7,7 @@ import io
 import json
 import tempfile
 import unittest
+from tests_support import isolated_module as setUpModule
 from pathlib import Path
 from unittest.mock import patch
 import torch
@@ -82,9 +83,37 @@ class NativeTests(unittest.TestCase):
                 error = torch.linalg.vector_norm(decoded - self.w) / torch.linalg.vector_norm(self.w)
                 self.assertLess(error.item(), 0.25)
                 self.assertTrue(q.verify_native_output(str(out))['ok'])
+                self.assertTrue(q.verify_output(str(out))['ok'])
                 self.assertEqual(meta['title'], 'fixture')
                 self.assertTrue(torch.equal(sd['img_in.weight'], self.sd['img_in.weight']))
                 self.assertEqual(sd['zero_buffer'].numel(), 0)
+
+    def test_source_free_verification_covers_all_output_modes(self):
+        for fmt in ('w4a8', 'mixed', 'fp16', 'bf16'):
+            with self.subTest(format=fmt):
+                extra = (('--profile', 'balanced', '--target-runtime', 'cpu',
+                          '--quality-gate', '0.25', '--global-error-gate', '0.25')
+                         if fmt == 'mixed' else ())
+                out = self.convert(fmt, *extra)
+                _, meta = self.load(out)
+                layers = json.loads(meta['_quantization_metadata'])['layers']
+                self.assertEqual(bool(layers), fmt not in ('fp16', 'bf16'))
+                self.assertTrue(q.verify_output(str(out))['ok'])
+                if fmt in ('fp16', 'bf16'):
+                    self.assertTrue(q.verify_native_output(str(out))['ok'])
+
+    def test_native_verifier_rejects_mismatched_layer_format(self):
+        out = self.convert('int8')
+        tensors, metadata = self.load(out)
+        quant = json.loads(metadata['_quantization_metadata'])
+        quant['layers'][WEIGHT[:-7]]['format'] = 'float8_e4m3fn'
+        metadata['_quantization_metadata'] = json.dumps(quant)
+        tampered = self.p / 'wrong-format.safetensors'
+        safetensors.torch.save_file(tensors, str(tampered), metadata=metadata)
+        result = q.verify_native_output(str(tampered))
+        self.assertFalse(result['ok'])
+        self.assertTrue(any('disagrees with int8' in error for error in result['errors']))
+        self.assertFalse(q.verify_output(str(tampered))['ok'])
 
     def test_chunk_invariance(self):
         for fmt in ('int8', 'w4a4', 'int8-convrot', 'int4-convrot', 'fp8-e4m3', 'fp8-e5m2'):
@@ -118,7 +147,7 @@ class NativeTests(unittest.TestCase):
             with self.subTest(format=fmt):
                 out = self.convert(fmt, '--quantize-text-embeddings')
                 sd, meta = self.load(out)
-                conf = json.loads(meta['_quantization_metadata'])['layers']
+                conf = q.read_quant_metadata(str(out))['layers']
                 self.assertEqual(conf[embedding[:-7]]['format'], q.FORMAT_INT8)
                 self.assertNotIn('convrot', conf[embedding[:-7]])
                 self.assertEqual(sd[embedding].dtype, torch.int8)
@@ -160,6 +189,234 @@ class NativeTests(unittest.TestCase):
                                                None, [], [], [], None, None)
                 self.assertEqual(next(d.kind for d in decisions if d.name == target),
                                  q.DecisionKind.QUANTIZE)
+
+    def test_installed_model_block_layouts(self):
+        # These names come from the corresponding ComfyUI model classes, not
+        # from the policy regexes. A detected family must select its repeated
+        # block linears while preserving small/sensitive boundary modules.
+        cases = {
+            'kandinsky5': (
+                ['visual_transformer_blocks.0.cross_attention.key_norm.weight'],
+                ['visual_transformer_blocks.0.cross_attention.to_query.weight',
+                 'visual_transformer_blocks.0.cross_attention.out_layer.weight',
+                 'visual_transformer_blocks.0.feed_forward.in_layer.weight',
+                 'visual_transformer_blocks.0.feed_forward.out_layer.weight',
+                 'text_transformer_blocks.0.self_attention.to_value.weight'],
+                ['out_layer.out_layer.weight']),
+            'ernie_image': (
+                ['layers.0.mlp.linear_fc2.weight'],
+                ['layers.0.mlp.linear_fc2.weight',
+                 'layers.0.mlp.gate_proj.weight',
+                 'layers.0.mlp.up_proj.weight',
+                 'layers.0.self_attention.to_q.weight',
+                 'layers.0.self_attention.to_out.0.weight'],
+                ['final_linear.weight']),
+            'cogvideox': (
+                ['blocks.0.norm1.linear.weight'],
+                ['blocks.0.q.weight', 'blocks.0.k.weight',
+                 'blocks.0.v.weight', 'blocks.0.attn_out.weight',
+                 'blocks.0.ff_proj.weight', 'blocks.0.ff_out.weight'],
+                ['proj_out.weight']),
+            'triposplat': (
+                ['cam_out_layer.weight', 'repo_layers.0.final_map.weight'],
+                ['blocks.0.attn.qkv.weight', 'blocks.0.attn.out.weight',
+                 'blocks.0.mlp.mlp.0.weight', 'blocks.0.mlp.mlp.2.weight',
+                 'noise_refiner.0.attn.qkv.weight'],
+                ['cam_out_layer.weight', 'repo_layers.0.final_map.weight']),
+            'hidream': (
+                ['caption_projection.0.linear.weight'],
+                ['double_stream_blocks.0.block.attn1.to_q.weight',
+                 'double_stream_blocks.0.block.attn1.to_out_t.weight',
+                 'double_stream_blocks.0.block.ff_i.experts.0.w1.weight',
+                 'double_stream_blocks.0.block.ff_t.w2.weight',
+                 'single_stream_blocks.0.block.ff_i.shared_experts.w3.weight'],
+                ['caption_projection.0.linear.weight']),
+            'hidream_o1': (
+                ['t_embedder1.mlp.0.weight', 'x_embedder.proj1.weight'],
+                ['language_model.layers.0.self_attn.q_proj.weight',
+                 'language_model.layers.0.mlp.down_proj.weight'],
+                ['visual.blocks.0.attn.qkv.weight',
+                 'x_embedder.proj1.weight', 'final_layer2.linear.weight']),
+            'seedvr2': (
+                ['blocks.35.mlp.vid.proj_out.weight'],
+                ['blocks.35.mlp.vid.proj_out.weight',
+                 'blocks.0.attn.proj_qkv.all.weight',
+                 'blocks.0.attn.proj_out.txt.weight',
+                 'blocks.0.mlp.all.proj_in_gate.weight'],
+                ['vid_out.proj.weight']),
+            'stable_audio': (
+                ['transformer.rotary_pos_emb.inv_freq'],
+                ['transformer.layers.0.self_attn.to_qkv.weight',
+                 'transformer.layers.0.self_attn.to_out.weight',
+                 'transformer.layers.0.cross_attn.to_kv.weight',
+                 'transformer.layers.0.ff.ff.0.proj.weight',
+                 'transformer.layers.0.ff.ff.2.weight'],
+                ['transformer.project_out.weight']),
+            'chroma': (
+                ['distilled_guidance_layer.norms.0.weight'],
+                ['double_blocks.0.img_attn.qkv.weight',
+                 'double_blocks.0.img_mlp.0.weight',
+                 'single_blocks.0.linear1.weight',
+                 'single_blocks.0.linear2.weight'],
+                ['distilled_guidance_layer.norms.0.weight']),
+            'hunyuan3d': (
+                ['latent_in.weight'],
+                ['double_blocks.0.img_attn.qkv.weight',
+                 'double_blocks.0.txt_mlp.2.weight',
+                 'single_blocks.0.linear1.weight'],
+                ['latent_in.weight', 'final_layer.linear.weight']),
+            'hunyuan3d21': (
+                ['t_embedder.mlp.2.weight',
+                 'blocks.0.attn1.k_norm.weight'],
+                ['blocks.0.attn1.to_q.weight',
+                 'blocks.0.attn2.out_proj.weight',
+                 'blocks.0.mlp.fc1.weight',
+                 'blocks.0.moe.experts.0.net.0.proj.weight'],
+                ['x_embedder.weight', 'final_layer.linear.weight']),
+            'pixeldit': (
+                ['core.pixel_embedder.proj.weight'],
+                ['core.patch_blocks.0.attn.qkv_x.weight',
+                 'core.patch_blocks.0.attn.proj_y.weight',
+                 'core.patch_blocks.0.mlp_x.w1.weight',
+                 'core.pixel_blocks.0.attn.qkv.weight'],
+                ['core.pixel_embedder.proj.weight',
+                 'core.final_layer.linear.weight']),
+            'stable_cascade': (
+                ['clf.1.weight'],
+                ['down_blocks.0.1.attention.attn.to_q.weight',
+                 'up_blocks.0.3.attention.attn.out_proj.weight',
+                 'down_blocks.0.2.channelwise.0.weight',
+                 'up_blocks.0.4.channelwise.4.weight'],
+                ['clip_txt_mapper.weight']),
+            'aura_flow': (
+                ['double_layers.0.attn.w1q.weight'],
+                ['double_layers.0.attn.w2o.weight',
+                 'double_layers.0.mlpC.c_fc1.weight',
+                 'double_layers.0.mlpX.c_proj.weight',
+                 'single_layers.0.mlp.c_fc2.weight'],
+                ['cond_seq_linear.weight']),
+            'hydit': (
+                ['mlp_t5.0.weight'],
+                ['blocks.0.attn1.Wqkv.weight',
+                 'blocks.0.attn1.out_proj.weight',
+                 'blocks.0.attn2.q_proj.weight',
+                 'blocks.0.mlp.fc1.weight'],
+                ['mlp_t5.0.weight']),
+            'hunyuan_video': (
+                ['txt_in.individual_token_refiner.blocks.0.norm1.weight'],
+                ['double_blocks.0.img_attn.qkv.weight',
+                 'double_blocks.0.txt_mlp.0.weight',
+                 'single_blocks.0.linear2.weight'],
+                ['img_in.proj.weight']),
+            'flux': (
+                ['double_blocks.0.img_attn.norm.key_norm.weight'],
+                ['double_blocks.0.img_attn.qkv.weight',
+                 'double_blocks.0.img_mlp.0.weight',
+                 'double_blocks.0.txt_mlp.2.weight',
+                 'single_blocks.0.linear1.weight'],
+                ['img_in.weight']),
+            'flux2': (
+                ['double_blocks.0.img_attn.norm.key_norm.weight',
+                 'double_stream_modulation_img.lin.weight'],
+                ['double_blocks.0.img_attn.qkv.weight',
+                 'double_blocks.0.img_mlp.0.weight',
+                 'single_blocks.0.linear2.weight'],
+                ['double_stream_modulation_img.lin.weight']),
+            'mochi': (
+                ['t5_yproj.weight'],
+                ['blocks.0.attn.qkv_x.weight',
+                 'blocks.0.attn.proj_y.weight',
+                 'blocks.0.mlp_x.w1.weight',
+                 'blocks.0.mlp_y.w2.weight'],
+                ['t5_yproj.weight']),
+            'pixart_sigma': (
+                ['t_block.1.weight'],
+                ['blocks.0.attn.qkv.weight',
+                 'blocks.0.attn.proj.weight',
+                 'blocks.0.cross_attn.q_linear.weight',
+                 'blocks.0.cross_attn.kv_linear.weight',
+                 'blocks.0.mlp.fc2.weight'],
+                ['t_block.1.weight']),
+            'cosmos_predict2': (
+                ['blocks.0.mlp.layer1.weight'],
+                ['blocks.0.self_attn.q_proj.weight',
+                 'blocks.0.cross_attn.k_proj.weight',
+                 'blocks.0.self_attn.output_proj.weight',
+                 'blocks.0.mlp.layer2.weight'],
+                ['final_layer.linear.weight']),
+            'lens': (
+                ['transformer_blocks.0.attn.norm_added_q.weight'],
+                ['transformer_blocks.0.attn.img_qkv.weight',
+                 'transformer_blocks.0.attn.txt_qkv.weight',
+                 'transformer_blocks.0.attn.to_out.0.weight',
+                 'transformer_blocks.0.img_mlp.w3.weight'],
+                ['img_in.weight']),
+            'qwen_image': (
+                ['txt_norm.weight', 'proj_out.weight'],
+                ['transformer_blocks.0.attn.to_q.weight',
+                 'transformer_blocks.0.img_mlp.net.0.proj.weight',
+                 'transformer_blocks.0.img_mlp.net.2.weight',
+                 'transformer_blocks.0.txt_mlp.net.0.proj.weight'],
+                ['transformer_blocks.0.attn.add_q_proj.weight',
+                 'proj_out.weight']),
+            'ideogram4': (
+                ['embed_image_indicator.weight'],
+                ['layers.0.attention.qkv.weight',
+                 'layers.0.attention.o.weight',
+                 'layers.0.feed_forward.w1.weight',
+                 'layers.0.feed_forward.w2.weight'],
+                ['input_proj.weight']),
+            'joyimage': (
+                ['double_blocks.0.attn.img_attn_qkv.weight'],
+                ['double_blocks.0.attn.img_attn_qkv.weight',
+                 'double_blocks.0.attn.txt_attn_proj.weight',
+                 'double_blocks.0.img_mlp.net.0.proj.weight',
+                 'double_blocks.0.txt_mlp.net.2.weight'],
+                ['img_in.weight']),
+        }
+        for family, (markers, targets, kept) in cases.items():
+            with self.subTest(family=family):
+                names = dict.fromkeys(markers + targets + kept)
+                info = q._ckpt([(name, (256,) if name.endswith('inv_freq') or
+                                  name.endswith('norm.weight') else (256, 256))
+                                for name in names])
+                detected = q.detect_architecture(info)
+                self.assertEqual(detected.architecture, family)
+                decisions = {d.name: d.kind for d in q.classify_tensors(
+                    info, detected, q.FORMAT_MIXED, None, [], [], [], None, None)}
+                for name in targets:
+                    self.assertEqual(decisions[name], q.DecisionKind.QUANTIZE, name)
+                for name in kept:
+                    self.assertNotEqual(decisions[name], q.DecisionKind.QUANTIZE, name)
+
+        for marker in ('lq_proj.latent_proj.0.weight',
+                       'pixel_embedder.proj.weight'):
+            with self.subTest(pixeldit_variant=marker):
+                names = [marker, 'patch_blocks.0.attn.qkv_x.weight',
+                         'patch_blocks.0.mlp_y.w3.weight']
+                info = q._ckpt([(name, (256, 256)) for name in names])
+                detected = q.detect_architecture(info)
+                self.assertEqual(detected.architecture,
+                                 'pid' if marker.startswith('lq_proj.') else 'pixeldit')
+                decisions = {d.name: d.kind for d in q.classify_tensors(
+                    info, detected, q.FORMAT_MIXED, None, [], [], [], None, None)}
+                self.assertEqual(decisions[names[1]], q.DecisionKind.QUANTIZE)
+                self.assertEqual(decisions[names[2]], q.DecisionKind.QUANTIZE)
+
+        mage = q._ckpt([
+            ('txt_norm.weight', (2560,)), ('proj_out.weight', (128, 256)),
+            ('transformer_blocks.0.attn.to_q.weight', (256, 256)),
+            ('transformer_blocks.0.img_mlp.net.0.proj.weight', (256, 256)),
+            ('transformer_blocks.0.txt_mlp.net.2.weight', (256, 256)),
+        ])
+        detected = q.detect_architecture(mage)
+        self.assertEqual(detected.architecture, 'mage_flow')
+        decisions = {d.name: d.kind for d in q.classify_tensors(
+            mage, detected, q.FORMAT_MIXED, None, [], [], [], None, None)}
+        for name in ('transformer_blocks.0.attn.to_q.weight',
+                     'transformer_blocks.0.img_mlp.net.0.proj.weight',
+                     'transformer_blocks.0.txt_mlp.net.2.weight'):
+            self.assertEqual(decisions[name], q.DecisionKind.QUANTIZE, name)
 
     def test_ace_step15_policy(self):
         targets = [
@@ -315,6 +572,7 @@ class NativeTests(unittest.TestCase):
         info = q.discover_checkpoint(str(self.src))
         detected = q.detect_architecture(info)
         self.assertEqual(detected.architecture, 'ming_image')
+        self.assertEqual(detected.classifier_info['variant'], 'design')
         for fmt in ('int8-convrot', 'w4a8'):
             with self.subTest(format=fmt):
                 out = self.convert(fmt)
@@ -384,6 +642,35 @@ class NativeTests(unittest.TestCase):
                     continue
                 self.assertNotEqual(detected.architecture, 'ming_image')
 
+    def test_ming_image_config_resolves_design_layer_pad_token(self):
+        weights = [
+            ('all_x_embedder.2-1.weight', (64, 256)),
+            ('all_final_layer.2-1.linear.weight', (64, 256)),
+            ('cap_embedder.1.weight', (64, 256)),
+            ('cap_pad_token', (1, 256)),
+            ('x_pad_token', (1, 256)),
+            ('layers.0.attention.to_q.weight', (64, 256)),
+            ('layers.0.feed_forward.w1.weight', (64, 256)),
+        ]
+        info = q._ckpt(weights)
+        with self.assertRaises(q.UnknownArchitectureError):
+            q.detect_architecture(info)
+
+        info.metadata['config'] = json.dumps({
+            'transformer': {'image_model': 'ming_image'},
+        })
+        detected = q.detect_architecture(info)
+        self.assertEqual(detected.architecture, 'ming_image')
+        self.assertEqual(detected.classifier_info['variant'], 'design-layer')
+        self.assertTrue(any('layer-decomposition' in warning for warning in detected.warnings))
+        self.assertIn('config.transformer.image_model=ming_image',
+                      detected.evidence)
+
+        incomplete = q._ckpt([weight for weight in weights if weight[0] != 'x_pad_token'])
+        incomplete.metadata.update(info.metadata)
+        with self.assertRaises(q.UnknownArchitectureError):
+            q.detect_architecture(incomplete)
+
     def test_ming_image_text_encoder_policy_and_native_output(self):
         weights = {
             'thinker.norm.weight': torch.ones(64),
@@ -440,7 +727,70 @@ class NativeTests(unittest.TestCase):
                     self.assertEqual(q.main(args), 0)
                 self.assertIn('ming_image', output.getvalue())
                 if fmt in q.NATIVE_FORMATS and fmt not in ('fp16', 'bf16'):
+                    self.assertIn('ming_image (design)', output.getvalue())
                     self.assertIn('candidate layers: 2', output.getvalue())
+
+    def test_ming_design_layer_format_dry_runs(self):
+        weights = {
+            'all_x_embedder.2-1.weight': self.w.clone(),
+            'all_final_layer.2-1.linear.weight': self.w.clone(),
+            'cap_embedder.1.weight': self.w.clone(),
+            'cap_pad_token': torch.ones(1, 256),
+            'x_pad_token': torch.ones(1, 256),
+            'layers.0.attention.to_q.weight': self.w.clone(),
+            'layers.0.feed_forward.w1.weight': self.w.clone(),
+        }
+        safetensors.torch.save_file(
+            weights, str(self.src),
+            metadata={'config': json.dumps({'transformer': {'image_model': 'ming_image'}})})
+        formats = ('int8', 'int8-convrot', 'w4a4', 'int4-convrot',
+                   'w4a8', 'mixed', 'fp8-e4m3', 'fp8-e5m2',
+                   'nvfp4', 'mxfp8', 'fp16', 'bf16')
+        for fmt in formats:
+            with self.subTest(format=fmt):
+                args = [str(self.src), '--format', fmt, '--output',
+                        str(self.p / f'layer-{fmt}.safetensors'), '--dry-run',
+                        '--progress', 'off']
+                if fmt == 'mixed':
+                    args += ['--experimental', '--target-runtime', 'cpu']
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(q.main(args), 0)
+                self.assertIn('ming_image', output.getvalue())
+                if fmt == 'mixed':
+                    self.assertIn('Design-Layer', output.getvalue())
+                if fmt in q.NATIVE_FORMATS and fmt not in ('fp16', 'bf16'):
+                    self.assertIn('ming_image (design-layer)', output.getvalue())
+                    self.assertIn('candidate layers: 2', output.getvalue())
+
+    def test_ming_design_layer_mixed_output_preserves_variant(self):
+        weights = {
+            'all_x_embedder.2-1.weight': self.w.clone(),
+            'all_final_layer.2-1.linear.weight': self.w.clone(),
+            'cap_embedder.1.weight': self.w.clone(),
+            'cap_pad_token': torch.ones(1, 256),
+            'x_pad_token': torch.ones(1, 256),
+            'layers.0.attention.to_q.weight': self.w.clone(),
+            'layers.0.feed_forward.w1.weight': self.w.clone(),
+        }
+        safetensors.torch.save_file(
+            weights, str(self.src),
+            metadata={'config': json.dumps({'transformer': {'image_model': 'ming_image'}})})
+        with contextlib.redirect_stdout(io.StringIO()) as inspected:
+            self.assertEqual(q.main([str(self.src), '--inspect']), 0)
+        self.assertIn('model variant   : design-layer', inspected.getvalue())
+        for fmt, provenance_key in (('mixed', 'comfy_wxa8'), ('int8', 'comfy_quantizer')):
+            with self.subTest(format=fmt):
+                options = ('--experimental', '--profile', 'balanced',
+                           '--target-runtime', 'cpu') if fmt == 'mixed' else ()
+                out = self.convert(fmt, *options)
+                state, metadata = self.load(out)
+                self.assertEqual(json.loads(metadata[provenance_key])['model_variant'],
+                                 'design-layer')
+                self.assertTrue(torch.equal(state['cap_pad_token'], weights['cap_pad_token']))
+                self.assertTrue(torch.equal(state['x_pad_token'], weights['x_pad_token']))
+                layers = json.loads(metadata['_quantization_metadata'])['layers']
+                self.assertIn('layers.0.attention.to_q', layers)
+                self.assertIn('layers.0.feed_forward.w1', layers)
 
     def test_qwen_image21_text_encoder_policy(self):
         info = q._ckpt([
@@ -499,7 +849,7 @@ class NativeTests(unittest.TestCase):
         out = self.convert('mixed', '--experimental', '--target-runtime', 'cpu',
                            '--quantize-text-embeddings')
         sd, meta = self.load(out)
-        conf = json.loads(meta['_quantization_metadata'])['layers']
+        conf = q.read_quant_metadata(str(out))['layers']
         self.assertEqual(conf[embedding[:-7]]['format'], q.FORMAT_INT8)
         self.assertEqual(sd[embedding].dtype, torch.int8)
         self.assertTrue(torch.equal(sd['model.position_embeddings.weight'],

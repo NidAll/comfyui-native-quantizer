@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-native-quantizer"
+version = "2.3.0rc2"
+description = "Native ComfyUI checkpoint quantization and conversion"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["comfyui", "quantization", "safetensors"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = ["numpy>=1.24", "safetensors>=0.4.3"]
+
+[project.urls]
+Repository = "https://github.com/NidAll/comfyui-native-quantizer"
+Documentation = "https://github.com/NidAll/comfyui-native-quantizer/tree/main/docs"
+Issues = "https://github.com/NidAll/comfyui-native-quantizer/issues"
+Changelog = "https://github.com/NidAll/comfyui-native-quantizer/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+hub = ["huggingface-hub>=0.24,<2"]
+kitchen = ["comfy-kitchen>=0.2.36,<0.3"]
+dev = ["build>=1.2", "twine>=5", "PyYAML>=6"]
+
+[project.scripts]
+comfyui-native-quantizer = "native_quantizer.cli.entrypoint:entrypoint"
+comfyquant = "native_quantizer.cli.entrypoint:entrypoint"
+quantizer-kitchen-benchmark = "native_quantizer.benchmark:main"
+
+[tool.setuptools]
+py-modules = ["comfyui_native_quantizer", "kitchen_policy", "calibration_capture", "quantizer_events", "benchmark_kitchen"]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["native_quantizer*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+"native_quantizer.testing" = ["fixtures/*.txt"]

@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from tests_support import isolated_module as setUpModule
 from pathlib import Path
 from unittest.mock import patch
 

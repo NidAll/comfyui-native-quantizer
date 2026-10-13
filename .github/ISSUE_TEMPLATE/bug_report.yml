@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible CLI or converter failure
+body:
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide a command and a small synthetic example when possible. Remove private paths, credentials, machine identity and private inputs.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Software versions
+      description: Quantizer, Python, PyTorch, Kitchen and relevant ComfyUI revision. Do not include device names or hardware details.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Relevant error or test evidence
+      description: Include a short redacted excerpt. Do not attach model weights or full diagnostic inventories.

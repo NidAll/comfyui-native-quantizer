@@ -1,4 +1,4 @@
 # Optional: remote safetensors downloads.
-huggingface-hub
-# Optional: NVFP4 / MXFP8 layout serializers (tested with 0.2.33).
-comfy-kitchen>=0.2.33
+huggingface-hub>=0.24,<2
+# Optional native layouts; W6A8 requires the explicit six-bit API.
+comfy-kitchen>=0.2.36,<0.3

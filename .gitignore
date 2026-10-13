@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .coverage
+build/
+dist/
+*.egg-info/
 
 # Local reports, logs, and conversion outputs
 *.log
@@ -24,3 +27,11 @@ README_quantizer_legacy.md
 .DS_Store
 .idea/
 .vscode/
+
+# Local workspace instructions contain private checkout paths
+AGENTS.md
+
+# Deferred local frontend: excluded from the CLI release and GitHub snapshot
+quantizer_tui/
+requirements-tui.txt
+test_quantizer_tui.py

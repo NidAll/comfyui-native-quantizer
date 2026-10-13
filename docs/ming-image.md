@@ -21,8 +21,15 @@ python comfyui_native_quantizer.py ming_image_0.1_ling_mini_2.0_bf16.safetensors
 The diffusion policy selects attention and feed-forward linears in the main
 transformer, context refiner, and noise refiner. It preserves embeddings,
 modulation, normalization, and final projections. Detection requires the
-combined ComfyUI block signature and either a Ming marker or the unmarked
-Design layout without Z-Image padding and decoder markers.
+combined ComfyUI block signature. `--inspect` reports `design` when learned
+padding tokens are absent, or `design-layer` when both learned padding tokens
+and Ming metadata or a marker are present. The variant is preserved in
+conversion provenance.
+
+Design-Layer is a layer-decomposition model and needs an input image and a
+multi-frame workflow. The bundled Ming Design generation workflow cannot use
+it; select the Design checkpoint for that workflow. Without activation
+calibration, mixed-mode quality gates measure weight reconstruction only.
 
 The text-encoder policy selects dense linears in the thinker and connector.
 Token embeddings, vision, MoE routing and expert banks, normalization, and

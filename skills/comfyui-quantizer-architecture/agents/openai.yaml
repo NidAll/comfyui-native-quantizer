@@ -1,0 +1,4 @@
+interface:
+  display_name: "Quantizer Architecture Integration"
+  short_description: "Add safe ComfyUI quantizer architecture policies"
+  default_prompt: "Use $comfyui-quantizer-architecture to audit and integrate this architecture using source and small fixtures, without heavy model downloads."
