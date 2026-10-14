@@ -15,8 +15,8 @@ from native_quantizer import api
 from native_quantizer.options import ConversionOptions
 from native_quantizer.errors import UnknownArchitectureError
 import comfyui_native_quantizer as q
-from test_architecture_detection import headers
-from tests_support import isolated_module as setUpModule, load_comfy_cpu
+from tests.cpu.test_architecture_detection import headers
+from tests.support import isolated_module as setUpModule, load_comfy_cpu
 
 
 class AddedArchitectureTests(unittest.TestCase):

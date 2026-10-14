@@ -1,5 +1,5 @@
 """Regression tests for native formats, quality gates and data-only adapters.
-Run: python -m unittest -v test_quantizer_native.py
+Run: python -m unittest -v tests.cpu.test_quantizer_native
 Optional NVFP4/MXFP8 tests require comfy-kitchen.
 """
 import contextlib
@@ -7,7 +7,7 @@ import io
 import json
 import tempfile
 import unittest
-from tests_support import isolated_module as setUpModule
+from tests.support import isolated_module as setUpModule
 from pathlib import Path
 from unittest.mock import patch
 import torch

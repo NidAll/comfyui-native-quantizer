@@ -14,6 +14,8 @@ DEFAULT_CHOICES = {
     'target_runtime': ('auto', 'nvidia', 'amd', 'cpu'),
     'compute_dtype': ('auto', 'fp32', 'fp16', 'bf16'),
     'codebook_mode': ('auto', 'fixed', 'fit'),
+    'optimizer': ('none', 'mse'),
+    'mse_objective': ('auto', 'weight', 'activation'),
     'rotation_backend': ('matrix', 'butterfly'),
     'progress': ('auto', 'on', 'off'),
     'log_level': ('debug', 'info', 'warning', 'error'),
@@ -36,7 +38,7 @@ def load_defaults(path: str | Path | None = None) -> dict:
         raise UsageError(f'cannot read quantizer configuration {target}: {exc}') from exc
     if not isinstance(data, dict) or type(data.get('schema')) is not int or data['schema'] != 1:
         raise UsageError(f'{target}: expected a JSON object with schema=1')
-    unknown = set(data) - {'schema', 'max_memory', 'offline', *DEFAULT_CHOICES}
+    unknown = set(data) - {'schema', 'max_memory', 'offline', 'mse_steps', 'mse_iterations', *DEFAULT_CHOICES}
     if unknown:
         raise UsageError(f'{target}: unknown defaults: {", ".join(sorted(unknown))}')
     for key, choices in DEFAULT_CHOICES.items():
@@ -47,6 +49,9 @@ def load_defaults(path: str | Path | None = None) -> dict:
             raise UsageError(f'{target}: max_memory must be a size of at least 4K')
     if 'offline' in data and type(data['offline']) is not bool:
         raise UsageError(f'{target}: offline must be true or false')
+    from native_quantizer.optimization import OptimizationConfig
+    OptimizationConfig(data.get('optimizer', 'none'), data.get('mse_objective', 'auto'),
+                       data.get('mse_steps', 17), data.get('mse_iterations', 3))
     return {key: value for key, value in data.items() if key != 'schema'}
 
 

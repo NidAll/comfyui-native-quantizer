@@ -11,7 +11,8 @@ from native_quantizer.identity import INT8_SCALE_MAX
 
 
 def quantize_int8_tensorwise_weight(
-        weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        weight: torch.Tensor, optimization=None, activations=None,
+        transform=None) -> Tuple[torch.Tensor, torch.Tensor]:
     """Rowwise symmetric INT8 (int8_tensorwise, no ConvRot).
 
     Serialized contract (matches ComfyUI TensorWiseINT8Layout + the Comfy-Org
@@ -29,6 +30,12 @@ def quantize_int8_tensorwise_weight(
         raise PolicyError("cannot quantize a weight containing NaN or Inf")
     scale = (abs_max.float() / float(INT8_SCALE_MAX)).clamp(min=1e-30)
     q = (weight / scale).round().clamp_(-128.0, 127.0).to(torch.int8)
+    if optimization is not None and optimization.enabled:
+        from native_quantizer.codecs.optimization import row_scale_search
+        def decode(s):
+            codes = (weight / s).round().clamp(-128, 127).to(torch.int8)
+            return codes, codes.float()
+        q, scale = row_scale_search(weight, q, scale, decode, optimization, activations, transform)
     # scale is stored [N, 1] so both the eager dequant (q.float() * scale) and
     # the CUDA int8_linear paths broadcast correctly on every backend
     return q.contiguous(), scale.contiguous().to(torch.float32)

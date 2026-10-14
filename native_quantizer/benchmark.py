@@ -13,7 +13,7 @@ from native_quantizer.codecs import dispatch, rotation, w4a4, w6a8
 from native_quantizer.planning import metrics
 
 
-def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None):
+def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None, optimization=None):
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA is required for this probe')
     if min(n, k, m, repeats) <= 0 or k % 256:
@@ -32,7 +32,7 @@ def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None):
                       (identity.FORMAT_W4A4, 8), (identity.FORMAT_W4A8, 8), (identity.FORMAT_W6A8, 8))):
         group = w6a8_group_size if fmt == identity.FORMAT_W6A8 else 16
         cgs = w4a4._pick_w4a4_convrot_group(k) if fmt == identity.FORMAT_W4A4 else 256
-        tensors = dispatch.quantize_weight_by_format(w, fmt, group, cgs)
+        tensors = dispatch.quantize_weight_by_format(w, fmt, group, cgs, optimization=optimization)
         conf = {'format': fmt}
         if fmt in identity.GROUPED_INT8_FORMATS:
             cls = kt.AsymW4A8Int8Layout
@@ -116,7 +116,8 @@ def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None):
                                 simulation_agreement_rel_l2=agreement,
                                 graph_replay=True, native_loader=bool(comfy_root)))
             del graph, captured, output, y_ref
-    return {'shape': {'m': m, 'n': n, 'k': k}, 'repeats': repeats, 'results': results}
+    return {'shape': {'m': m, 'n': n, 'k': k}, 'repeats': repeats, 'results': results,
+            'optimization': optimization.to_dict() if optimization is not None else {'mode': 'none'}}
 
 
 def main(argv=None) -> int:
@@ -127,8 +128,11 @@ def main(argv=None) -> int:
     parser.add_argument('--repeats', type=int, default=10)
     parser.add_argument('--comfy-root')
     parser.add_argument('--w6a8-group-size', type=int, default=16)
+    parser.add_argument('--optimizer', choices=('none', 'mse'), default='none')
     args = parser.parse_args(argv)
-    sample = run(args.n, args.k, args.m, args.repeats, args.comfy_root, args.w6a8_group_size)
+    from native_quantizer.optimization import OptimizationConfig
+    sample = run(args.n, args.k, args.m, args.repeats, args.comfy_root, args.w6a8_group_size,
+                 optimization=OptimizationConfig(args.optimizer, 'weight'))
     print(json.dumps({'schema': 'kitchen-costs/v2',
                       'kitchen_version': importlib.metadata.version('comfy-kitchen'),
                       'benchmarks': [sample]}, indent=2))

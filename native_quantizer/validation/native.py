@@ -8,7 +8,8 @@ from typing import Any, Dict, List
 
 from native_quantizer.architectures.policies import TEXT_TOKEN_EMBEDDING
 from native_quantizer.checkpoint_io.reader import RawSafetensorsFile
-from native_quantizer.errors import InputError
+from native_quantizer.errors import InputError, UsageError
+from native_quantizer.optimization import read_optimization_metadata
 from native_quantizer.files import sha256_safetensors_payload
 from native_quantizer.formats import NATIVE_FORMATS
 from native_quantizer.identity import FORMAT_INT8, FORMAT_W4A4
@@ -20,6 +21,7 @@ def verify_native_output(path: str) -> Dict[str, Any]:
     with RawSafetensorsFile(path) as raw:
         try:
             provenance = json.loads(raw.metadata['comfy_quantizer'])
+            read_optimization_metadata(provenance.get('optimization'))
             layers = read_quant_metadata(path)['layers']
             if not isinstance(layers, dict):
                 raise ValueError('layers must be an object')
@@ -102,6 +104,6 @@ def verify_native_output(path: str) -> Dict[str, Any]:
                     global_scale = raw.read_tensor(weight + '_scale_2').float()
                     if global_scale.numel() != 1 or not bool(torch.isfinite(global_scale).all()) or not bool((global_scale > 0).all()):
                         errors.append(f'{layer}: invalid NVFP4 tensor scale')
-        except (KeyError, ValueError, TypeError, AttributeError, InputError) as exc:
+        except (KeyError, ValueError, TypeError, AttributeError, InputError, UsageError) as exc:
             errors.append(str(exc))
     return {'ok': not errors, 'errors': errors, 'runtime_verified': False}

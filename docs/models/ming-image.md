@@ -11,10 +11,10 @@ native ComfyUI output.
 Preview each local checkpoint before conversion:
 
 ```bash
-python comfyui_native_quantizer.py ming_image_0.1_design_bf16.safetensors --inspect
-python comfyui_native_quantizer.py ming_image_0.1_design_bf16.safetensors \
+comfyquant --no-config ming_image_0.1_design_bf16.safetensors --inspect
+comfyquant --no-config ming_image_0.1_design_bf16.safetensors \
   --format int8-convrot --dry-run
-python comfyui_native_quantizer.py ming_image_0.1_ling_mini_2.0_bf16.safetensors \
+comfyquant --no-config ming_image_0.1_ling_mini_2.0_bf16.safetensors \
   --components text_encoder --format int8-convrot --dry-run
 ```
 
@@ -27,8 +27,8 @@ and Ming metadata or a marker are present. The variant is preserved in
 conversion provenance.
 
 Design-Layer is a layer-decomposition model and needs an input image and a
-multi-frame workflow. The bundled Ming Design generation workflow cannot use
-it; select the Design checkpoint for that workflow. Without activation
+multi-frame workflow. Use a workflow built for that variant. Design text-to-image workflows require
+the Design checkpoint. Without activation
 calibration, mixed-mode quality gates measure weight reconstruction only.
 
 The text-encoder policy selects dense linears in the thinker and connector.

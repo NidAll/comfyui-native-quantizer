@@ -82,6 +82,6 @@ def browse_huggingface(repo: str, revision: str = 'main', subfolder: str = '') -
 
 
 def benchmark(n: int, k: int, m: int, repeats: int, comfy_root: str | None = None,
-              w6a8_group_size: int = 16) -> dict:
+              w6a8_group_size: int = 16, optimization=None) -> dict:
     from native_quantizer.benchmark import run
-    return run(n, k, m, repeats, comfy_root, w6a8_group_size)
+    return run(n, k, m, repeats, comfy_root, w6a8_group_size, optimization=optimization)

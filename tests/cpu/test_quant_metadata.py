@@ -4,7 +4,7 @@ import io
 import json
 import tempfile
 import unittest
-from tests_support import isolated_module as setUpModule, load_comfy_cpu
+from tests.support import isolated_module as setUpModule, load_comfy_cpu
 from pathlib import Path
 from unittest.mock import patch
 

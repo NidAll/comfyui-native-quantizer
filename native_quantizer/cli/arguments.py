@@ -22,8 +22,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
         description=(
             "Native-format checkpoint converter for ComfyUI-compatible "
-            "diffusion models and text encoders. See the module docstring for "
-            "the verified format specification and exact source revisions."),
+            "diffusion models and text encoders. Use --list-formats for native "
+            "representations and backend requirements."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {get_converter_version()}")
@@ -58,9 +58,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    default="auto",
                    help="W4A8 codebook strategy: auto uses the fast fixed "
                         "Gaussian table and fits only heavy-tailed layers; "
-                        "fixed never fits; fit preserves the slower legacy "
-                        "per-layer Lloyd-Max path")
+                        "fixed never fits; fit uses per-layer Lloyd-Max fitting")
     p.add_argument("--enable-w6a8", action="store_true", help="mixed mode: opt in to native W6A8 candidates")
+    p.add_argument('--optimizer', choices=('none', 'mse'), default='none',
+                   help='optional native scale/clipping optimization; none preserves existing encoders')
+    p.add_argument('--mse-objective', choices=('auto', 'weight', 'activation'), default='auto',
+                   help='MSE objective: auto uses calibration where available, otherwise weight MSE')
+    p.add_argument('--mse-steps', type=int, default=17,
+                   help='scale/clipping grid size in [2,129] (default 17)')
+    p.add_argument('--mse-iterations', type=int, default=3,
+                   help='least-squares refinement count in [0,16] (default 3)')
     p.add_argument("--w6a8-group-size", type=int, default=16, help="W6A8 group size: positive multiple of 16 dividing K (default 16)")
     p.add_argument("--profile", choices=list(MIXED_PROFILES), default="auto",
                    help="mixed-mode profile: auto detects the runtime (GPU -> "
@@ -104,9 +111,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    metavar="F",
                    help="mixed mode: hard limit on the fraction of final "
                         "targeted serialized bytes occupied by "
-                        "original-precision tensors (legacy option name "
-                        "--max-bf16-fraction; the alias "
-                        "--max-original-byte-fraction is preferred)")
+                        "original-precision tensors (--max-bf16-fraction "
+                        "is an alias of --max-original-byte-fraction)")
     p.add_argument("--w4a4-linear-dtype", choices=["int4", "int8"], default="int8",
                    help="convrot_w4a4 execution variant: int4 (true W4A4) or "
                         "int8 (4-bit weights through the int8 path; the "

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui-native-quantizer"
-version = "2.3.0rc2"
+version = "2.3.0rc3"
 description = "Native ComfyUI checkpoint quantization and conversion"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

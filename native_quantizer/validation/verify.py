@@ -16,7 +16,8 @@ from native_quantizer.codecs.w4a4 import dequantize_w4a4_weight
 from native_quantizer.codecs.w4a8 import dequantize_w4a8_weight, validate_w4_shape
 from native_quantizer.codecs.w6a8 import pack_w6, unpack_w6, validate_w6_shape
 from native_quantizer.dtypes import tensor_nbytes, torch_dtype_from_safe
-from native_quantizer.errors import PolicyError, ValidationError
+from native_quantizer.errors import PolicyError, ValidationError, UsageError
+from native_quantizer.optimization import read_optimization_metadata
 from native_quantizer.files import sha256_file, sha256_safetensors_payload
 from native_quantizer.identity import (
     DEFAULT_W4A4_LINEAR_DTYPE,
@@ -435,6 +436,11 @@ def verify_output(output_path: str) -> Dict[str, Any]:
     # Extension metadata consistency (informational; never fails the check).
     ext = meta.get(METADATA_KEY_EXT)
     if ext:
+        try:
+            read_optimization_metadata(json.loads(ext).get('optimization'))
+            check('optimization-metadata', True, 'optional optimizer provenance valid')
+        except (TypeError, ValueError, UsageError, AttributeError) as exc:
+            check('optimization-metadata', False, str(exc))
         try:
             ext_obj = json.loads(ext)
             ext_counts = None

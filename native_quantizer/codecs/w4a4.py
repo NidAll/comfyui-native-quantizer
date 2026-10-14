@@ -13,7 +13,7 @@ from native_quantizer.identity import W4A4_EMISSION_MAX, W4A4_QUANT_GROUP_SIZE
 
 
 def quantize_w4a4_weight(weight: torch.Tensor,
-                         convrot_groupsize: int) -> Tuple[torch.Tensor, torch.Tensor]:
+                         convrot_groupsize: int, optimization=None, activations=None) -> Tuple[torch.Tensor, torch.Tensor]:
     """ConvRot W4A4 quantization, byte-identical to comfy-kitchen's eager
     `quantize_convrot_w4a4_weight`: regular-Hadamard weight rotation, rowwise
     symmetric signed int4 with absmax scale = max/7, emission range [-7, 7],
@@ -28,10 +28,12 @@ def quantize_w4a4_weight(weight: torch.Tensor,
         raise PolicyError(f"invalid W4A4 weight: {why}")
     h = build_hadamard(convrot_groupsize, device=weight.device, dtype=weight.dtype)
     rot = rotate_weight(weight, h, convrot_groupsize)
-    return quantize_rotated_int4(rot)
+    return quantize_rotated_int4(rot, optimization, activations,
+                                lambda x: rotate_weight(x, h.float(), convrot_groupsize))
 
 
-def quantize_rotated_int4(rot: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def quantize_rotated_int4(rot: torch.Tensor, optimization=None, activations=None,
+                          transform=None) -> Tuple[torch.Tensor, torch.Tensor]:
     """Kitchen signed INT4: row scale, even low nibble, row-major int8 storage."""
     abs_max = rot.abs().amax(dim=-1, keepdim=True).clamp(min=1e-10)
     if not bool(torch.isfinite(abs_max).all()):
@@ -39,6 +41,12 @@ def quantize_rotated_int4(rot: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor
     scale = abs_max / float(W4A4_EMISSION_MAX)
     q = (rot / scale).round().clamp_(-float(W4A4_EMISSION_MAX),
                                     float(W4A4_EMISSION_MAX)).to(torch.int8)
+    if optimization is not None and optimization.enabled:
+        from native_quantizer.codecs.optimization import row_scale_search
+        def decode(s):
+            codes = (rot / s).round().clamp(-W4A4_EMISSION_MAX, W4A4_EMISSION_MAX).to(torch.int8)
+            return codes, codes.float()
+        q, scale = row_scale_search(rot, q, scale, decode, optimization, activations, transform)
     packed = (q[:, 0::2] & 0xF) | ((q[:, 1::2] & 0xF) << 4)
     return packed, scale.reshape(-1).to(torch.float32)
 

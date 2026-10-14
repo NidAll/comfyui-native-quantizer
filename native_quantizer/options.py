@@ -15,6 +15,10 @@ class ConversionOptions:
     components: str = 'auto'
     quantize_text_embeddings: bool = False
     codebook_mode: str = 'auto'
+    optimizer: str = 'none'
+    mse_objective: str = 'auto'
+    mse_steps: int = 17
+    mse_iterations: int = 3
     enable_w6a8: bool = False
     w6a8_group_size: int = 16
     profile: str = 'auto'
@@ -88,6 +92,8 @@ class ConversionOptions:
 
 
 def validate_conversion_options(args) -> None:
+    from native_quantizer.optimization import OptimizationConfig
+    OptimizationConfig.from_options(args)
     from native_quantizer.formats import FORMAT_ALIASES, NATIVE_FORMATS
     from native_quantizer.config import DEFAULT_CHOICES
 

@@ -58,6 +58,7 @@ from native_quantizer.runtime.capabilities import (
 )
 from native_quantizer.runtime.costs import kernel_contract
 from native_quantizer.utils import human_bytes
+from native_quantizer.optimization import OptimizationConfig
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,9 @@ class MixedPlanner:
                  codebook_mode: str = "auto",
                  objective: str = "kitchen",
                  kernel_costs: Optional[Dict] = None,
-                 enable_w6a8: bool = False, w6a8_group_size: int = 16):
+                 enable_w6a8: bool = False, w6a8_group_size: int = 16,
+                 optimization=None):
+        self.optimization = optimization or OptimizationConfig()
         if objective not in ("kitchen", "size"):
             raise PolicyError(f"unknown mixed objective {objective!r}")
         self.enable_w6a8 = enable_w6a8
@@ -244,14 +247,15 @@ class MixedPlanner:
             raise PolicyError(f"planner references missing tensor {d.name!r}")
         cgs = self.cgs_for(int(meta.shape[1]), fmt)
         activations = self._activations(d.name)
-        if _quant_work_bytes(meta, fmt) <= self.max_mem:
+        if _quant_work_bytes(meta, fmt, self.optimization) <= self.max_mem:
             w = reader.read_tensor(d.name)
             w = w.to(device=self.device, dtype=(self.compute_dtype
                      if self.compute_dtype is not None and w.dtype not in FP8_DTYPES else w.dtype))
             try:
                 q = quantize_weight_by_format(
                     w, fmt, d.group_size, cgs, seed=self.seed,
-                    codebook_mode=self.codebook_mode)
+                    codebook_mode=self.codebook_mode, optimization=self.optimization,
+                    activations=activations)
                 dq = dequantize_weight_by_format(q, fmt, d.group_size, cgs,
                                                  torch.float32)
                 metrics = compute_weight_metrics(w, dq)
@@ -279,7 +283,7 @@ class MixedPlanner:
         # uses the pre-fit codebook row chunks, identical to the reference
         # path. Runtime output error accumulates per sample across chunks.
         n, k = int(meta.shape[0]), int(meta.shape[1])
-        chunk_rows = _chunk_rows_for_budget(k, n, self.max_mem, fmt)
+        chunk_rows = _chunk_rows_for_budget(k, n, self.max_mem, fmt, self.optimization)
         acc = _MetricAccumulator(d.name)
         out_acc = None
         out_accs = None
@@ -320,7 +324,8 @@ class MixedPlanner:
                                         self.compute_dtype,
                                         als_iterations=(
                                             3 if self.codebook_mode == "fit"
-                                            else W4A8_ALS_ITERS))
+                                            else W4A8_ALS_ITERS), optimization=self.optimization,
+                                        activations=activations)
                 dq = dequantize_weight_by_format(q, FORMAT_W4A8, d.group_size,
                                                  cgs, torch.float32)
                 orig_chunk = reader.read_tensor(d.name)[r0:r1]
@@ -344,7 +349,8 @@ class MixedPlanner:
                     chunk = chunk.to(self.device)
                 q = quantize_weight_by_format(
                     chunk, fmt, d.group_size, cgs, seed=self.seed,
-                    codebook_mode=self.codebook_mode)
+                    codebook_mode=self.codebook_mode, optimization=self.optimization,
+                    activations=activations)
                 dq = dequantize_weight_by_format(q, fmt, d.group_size, cgs,
                                                  torch.float32)
                 chunk_cpu = chunk.cpu()

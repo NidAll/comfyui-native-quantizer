@@ -39,7 +39,7 @@ packing/ConvRot alignment gates; unsupported dimensions retain source precision.
 Independent header/shape, protected-tensor and synthetic conversion/verification
 tests pass. The common native consumer metadata/Linear contract is exercised
 separately. Full extension forwards and real audio/video/SR quality have not been
-evaluated for this candidate, so these policies remain experimental.
+evaluated, so these policies remain experimental.
 
 Reviewed primary sources:
 

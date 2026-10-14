@@ -1,77 +1,90 @@
-# Linux command-line integration
+# Installation, commands and configuration
 
-Use the existing ComfyUI Python environment; the installer does not invoke pip,
-fetch weights or change ComfyUI. From this checkout:
-
-```sh
-python scripts/install_linux.py --cuda-default --offline-default
-```
-
-`--cuda-default` verifies the live CUDA backend before saving the preference.
-Omit it to retain portable auto/CPU settings. `--python` selects an existing
-interpreter. The default user install provides:
-
-- `comfyquant` and `comfyui-native-quantizer` in `~/.local/bin`, preserving the
-  caller's working directory and relative input paths.
-- Fish, Bash and Zsh completion definitions. Fish loads its per-command files
-  automatically. Bash can source the file under
-  `~/.local/share/bash-completion/completions/comfyquant`. For Zsh, add
-  `~/.local/share/zsh/site-functions` to `fpath` before `compinit` if necessary.
-  No shell startup files are rewritten.
-
-## Configuration and scripting
-
-Defaults are data-only JSON in
-`$XDG_CONFIG_HOME/comfyui-native-quantizer/config.json`, falling back to
-`~/.config/comfyui-native-quantizer/config.json`. CLI options override the file.
-`--config PATH` chooses a file; `--no-config` gives reproducible built-in
-defaults. Unsupported keys and invalid values fail clearly. Destructive paths,
-overwrite and resume cannot be enabled through this defaults file.
+Use an existing Python environment with the appropriate PyTorch build. A package
+installation creates `comfyquant` and `comfyui-native-quantizer` console scripts
+in that environment's `bin` directory:
 
 ```sh
-comfyquant --show-config
-comfyquant --diagnose --json
-comfyquant --list-formats --json
-comfyquant --list-architectures --json
-comfyquant --audit-architectures /path/to/ComfyUI --json
-comfyquant input.safetensors --format int8-convrot --output output.safetensors --validate
-comfyquant input.safetensors --inspect --json
-comfyquant --verify-output output.safetensors --json
+/path/to/environment/bin/python -m pip install /path/to/package.whl
+/path/to/environment/bin/comfyquant --version
+/path/to/environment/bin/python -m native_quantizer --no-config --list-formats
 ```
 
-`device=auto` selects CUDA/ROCm when available, otherwise CPU. An explicit
-`device=cuda` or `rocm` fails if that backend is unavailable. `--device cpu`
-overrides a saved CUDA preference. CUDA math stays FP32 unless an applicable
-format is explicitly configured otherwise. The memory limit bounds temporary
-conversion work, not total process/device residency.
+Activate the environment or add its `bin` directory to `PATH` to use the short
+commands. For a local wheel rebuilt with the same version, force replacement
+without changing compute dependencies:
 
-`offline=true` prevents CLI model downloads; repository metadata
-browsing remains available. A deliberate `--no-offline` overrides the CLI
-setting. Development and architecture evaluation must still follow the
-no-heavy-download rule in AGENTS.md and the integration skill.
+```sh
+/path/to/environment/bin/python -m pip install --no-index --no-deps \
+  --force-reinstall /path/to/package.whl
+```
 
-Help, version, catalog lists, completions and registry audits do not import
-PyTorch. Usage errors exit with 2, conversion/verification failures
-with 1, success with 0 and keyboard cancellation with 130. JSON is supported
-for the operations shown above; conversion progress remains on stderr and
-the existing JSONL event stream remains available.
+Check installed imports and run a synthetic conversion outside the source
+checkout. An editable install loads the checkout and does not validate wheel
+contents.
 
-## Conversion changes and evidence
+## Shell completion and source-checkout launchers
 
-Native row chunks are copied/cast directly into the selected device, avoiding
-an intermediate FP32 CPU buffer. Reconstruction checks group their scalar
-results into one device-to-host transfer. Quality gates and format payloads
-remain unchanged. Native publication rejects source inode/size/mtime/ctime
-changes observed during conversion, supplementing the existing output race
-checks; source content identities remain embedded in provenance.
+`comfyquant --completions fish`, `bash` or `zsh` emits completion definitions.
+Place them in the shell's normal completion directory.
 
-Use bounded synthetic fixtures to measure cold and warm behavior separately
-and compare payload hashes on the same backend. Timing is workload-dependent;
-these optimizations do not establish whole-model image quality, conversion
-throughput on every format, inference speed or peak VRAM.
+The optional `scripts/install_linux.py` helper installs user-local launchers,
+completion files and XDG defaults from a source checkout:
 
-The `comfyui-quantizer-architecture` skill lives under `skills/` and is installed
-in the user's Codex skills directory. See
-[architecture-candidates.md](architecture-candidates.md) for the current
-source-only shortlist. The registry audit finds newly added ComfyUI classes;
-it does not prove every policy's tensor selection or native loader behavior.
+```sh
+python scripts/install_linux.py --offline-default
+```
+
+Its generated launchers load that checkout directly; keep the checkout present.
+For installed-wheel testing, use the environment's console scripts instead.
+`--python` chooses the interpreter. `--cuda-default` verifies CUDA before saving
+that preference. The helper does not install packages, download models or modify
+shell startup files.
+
+## Defaults
+
+CLI defaults live in `$XDG_CONFIG_HOME/comfyui-native-quantizer/config.json`, or
+`~/.config/comfyui-native-quantizer/config.json` when XDG is unset:
+
+```json
+{
+  "schema": 1,
+  "device": "auto",
+  "target_runtime": "auto",
+  "max_memory": "512M",
+  "offline": true,
+  "optimizer": "none",
+  "mse_objective": "auto",
+  "mse_steps": 17,
+  "mse_iterations": 3
+}
+```
+
+CLI flags override the file. `--config PATH` selects another file; `--no-config`
+uses built-in defaults. Invalid or unknown values fail clearly. Overwrite and
+resume cannot be enabled through this file. Python API requests remain explicit.
+
+`device=auto` uses an available accelerator or CPU. Explicit CUDA/ROCm requests
+fail when unavailable. `--device cpu` overrides a saved accelerator preference.
+The memory budget estimates temporary conversion work, excluding mmap pages,
+framework overhead and allocator caches.
+
+`offline=true` prevents model downloads; a deliberate `--no-offline` overrides
+it. Repository metadata browsing remains available. Development checks and
+benchmarks use synthetic fixtures rather than downloading weights.
+
+## Inspection and scripting
+
+```sh
+comfyquant --no-config --diagnose --json
+comfyquant --no-config --list-formats --json
+comfyquant --no-config --list-architectures --json
+comfyquant --no-config --audit-architectures /path/to/ComfyUI --json
+comfyquant --no-config input.safetensors --inspect --json
+comfyquant --no-config --verify-output output.safetensors --json
+```
+
+Help, version, catalogs, completion and architecture audits start without
+PyTorch. Exit codes are 0 for success, 1 for operation failure, 2 for usage errors
+and 130 for keyboard cancellation. Conversion progress uses stderr; JSONL events
+are available with `--events-jsonl PATH`.

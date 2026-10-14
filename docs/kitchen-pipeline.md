@@ -1,101 +1,66 @@
 # Kitchen-targeted mixed precision
 
-The checkpoint is the runtime boundary. The converter emits ComfyUI's native
-packed tensors and metadata; ComfyUI owns loading, patching, casting and
-offloading, and Kitchen owns execution and temporary workspaces. There is no
-custom loader, persistent dequantized-weight cache or model monkeypatch.
+The checkpoint is the runtime boundary. The converter emits native ComfyUI
+packed tensors and metadata. ComfyUI owns loading, patching, casting and
+offloading; Kitchen owns execution and temporary workspaces.
 
-## Findings and architecture
+## Planning and native execution
 
-The old mixed planner minimized serialized bytes subject to error gates. It did
-not distinguish native integer execution from packed formats that expand weights
-before GEMM. In particular, the W4A4 storage name does not determine activation
-precision. Repeated transfers during evaluation, duplicated signed INT4 packing,
-and lack of bounded activation capture also complicated the pipeline.
+Architecture policies select eligible linears and protect sensitive projections,
+normalization, embeddings and unsupported tensors. The mixed planner evaluates
+weight reconstruction and, when supplied, recorded activation output error,
+including activation quantization. Optional [MSE optimization](mse-optimization.md)
+optimizes candidate payloads before these quality gates and format selection.
 
-The pipeline now has these responsibilities:
-
-1. Architecture policies select linear layers and protect sensitive projections,
-   normalization, embeddings and unsupported tensors. Explicit embedding opt-in
-   remains an indexed-row dequantization path, not integer GEMM coverage.
-2. `calibration_capture.py` records a bounded deterministic reservoir from supplied
-   modules during representative inference. Existing calibration ingestion checks
-   widths, finite values, budgets and checkpoint-bound caches. Capture hooks exist
-   only within the context manager and are removed on exceptions.
-3. `MixedPlanner` evaluates reconstruction and, when supplied, activation output
-   error including activation quantization. W4A4 evaluation uses the effective
-   activation precision; uncertain dispatch evaluates both variants conservatively.
-4. `kitchen_policy.py` describes execution contracts separately from quality and
-   storage. The planner first satisfies quality/compression gates, then spends
-   available storage budget to improve execution without increasing estimated
-   error. Shape-specific measurements override the expansion-cost heuristic when
-   both candidates have measurements. Ties are resolved by layer/format names.
-5. Offline transforms and quantization emit the existing native layouts. Native
-   and mixed INT4 share one signed nibble encoder. Weight metrics stay on the
-   evaluation device and return four scalar reductions together; activation
-   scoring avoids transferring full weights and decoded weights back to CPU.
-   Chunked CPU reference scoring reuses one transfer per tensor per chunk.
-6. Streaming serialization, independent reference decoders, resume integrity,
-   quality gates and atomic publication remain in place. The planner revision
-   changes to invalidate plans made with the old policy.
-7. ComfyUI loads `comfy_quant` metadata into its native `QuantizedTensor` layouts.
-   Normal model patching and device movement continue through ComfyUI. Forced
-   full-precision execution and patches that require floating weights retain
-   their necessary dequantization path.
-
-## Runtime formats
+The planner satisfies quality and compression constraints, then uses available
+storage headroom to improve estimated execution cost without increasing error.
+Shape-specific measurements override expansion-cost heuristics when both
+candidates have measurements. Layer and format names resolve ties deterministically.
+`size-first` or `--mixed-objective size` selects for minimum storage. Explicit
+byte/error limits take precedence; an unsatisfied gate aborts publication.
 
 | Format | Serialized contract | Runtime implication |
 | --- | --- | --- |
-| INT8 | Row-major INT8 `[N,K]`, FP32 row scales | Direct INT8 linear, no weight rotation or nibble expansion |
-| W4A4 | Row-major signed INT8 `[N,K/2]`, even index in low nibble, FP32 row scales; quant group 64 | Native INT4 only on a compatible dispatch and `linear_dtype=int4`; otherwise packed GEMV or expansion into INT8 |
-| W6A8 | INT8 `[N,3K/4]`, FP8 E4M3 `[N,K/G]`, FP32 channel scales `[N]`; G defaults to 16, ConvRot 256 | Uniform six-bit codes decode onto INT8; mixed opt-in, possible decode workspace |
-| W4A8 | INT8 `[N,K/2]`, FP8 E4M3 group scales, FP32 channel scales and 16-entry codebook; group 16, ConvRot 256 | Small-M fused decode GEMV where available; otherwise INT8 decode workspace |
+| INT8 | INT8 `[N,K]`, FP32 row scales | Direct INT8 linear |
+| W4A4 | Signed nibbles in INT8 `[N,K/2]`, even index in low nibble, FP32 row scales; rotation group 64 | Native INT4 on compatible dispatch with `linear_dtype=int4`; otherwise packed GEMV or INT8 expansion |
+| W4A8 | INT8 `[N,K/2]`, FP8 group scales, FP32 channel scales and 16-entry codebook; group 16, ConvRot 256 | Fused packed GEMV where available; otherwise INT8 decode workspace |
+| W6A8 | INT8 `[N,3K/4]`, FP8 `[N,K/G]`, FP32 channel scales; G defaults to 16, ConvRot 256 | Six-bit codes decode onto INT8; explicit mixed opt-in |
 
-Weights are rotated once offline. Removing the matching activation transform
-would change the model's math. The normal runtime uses Kitchen's fused rotation
-and quantization when supported; the converter cannot safely fold rotations
-through arbitrary nonlinearities or residual connections. W4A8 group scales stay
-FP8, which is required by the installed CUDA chunked fast path. No correction
-matrix or runtime transpose/repacking format is added.
+W4A4 scoring follows effective activation precision. Uncertain dispatch evaluates
+both activation variants conservatively. A storage name alone does not certify
+native INT4 execution. Small-M packed paths may avoid the expansion workspace;
+latency depends on workload shape, dtype and the installed backend.
 
-The expansion contract is a conservative general-GEMM cost indicator. It is not
-a claim that every invocation allocates expanded weights: small-M packed GEMV
-paths can avoid that workspace. Actual latency depends on M, N, K, dtype and the
-installed backend. Native INT4 is not inherently faster than INT8.
+Rotated weights require the matching runtime activation transform. Kitchen can
+fuse rotation and activation quantization; rotations cannot be folded through
+arbitrary nonlinearities or residuals. W4A8 relative group scales remain FP8 for
+native chunked CUDA execution. No correction matrix or custom runtime is added.
+Embedding opt-in uses indexed-row dequantization and does not certify integer
+GEMM. Forced full-precision operations and patches requiring floating weights
+retain their necessary dequantization paths.
 
-FP8, NVFP4 and MXFP8 remain explicit formats. They are not automatically inserted
-into mixed plans without matching target acceleration and comparable quality
-scoring. Unsupported AWQ/SVDQuant native loading is not invented by the converter.
+FP8, NVFP4 and MXFP8 are explicit conversion formats. Mixed plans use the
+W4A4/W4A8/INT8 candidate set, with W6A8 enabled only by `--enable-w6a8`.
 
-## Use
+## Conversion and calibration
 
-Run from the repository checkout; retain the supporting Python modules alongside
-the entry point. Mixed conversion no longer needs `--experimental`.
-
-```bash
-python comfyui_native_quantizer.py model.safetensors \
-  --format mixed --profile throughput --target-runtime nvidia \
+```sh
+comfyquant --no-config model.safetensors --format mixed \
+  --profile throughput --target-runtime nvidia --optimizer mse \
   --calibration-source activations.npz --require-calibration \
-  --max-memory 512M --output model-mixed.safetensors
+  --max-memory 512M --output model-mixed.safetensors --validate
 ```
 
-`balanced` keeps the existing 0.90-byte/parameter budget and spends available
-headroom on execution improvements. `throughput` allows 1.10 bytes/parameter,
-which permits row-scaled INT8 for most targeted layers. Quality thresholds remain
-the same. `size-first` or `--mixed-objective size` retains minimum-storage
-selection. Hard user-specified byte/error limits still take precedence; failure
-to satisfy a gate aborts publication.
+`balanced` budgets 0.90 bytes per parameter; `throughput` allows 1.10, permitting
+row-scaled INT8 for most targeted layers. Review the dry-run and report for the
+actual selected formats and protected precision.
 
-`--require-calibration` requires samples for **every targeted layer**. Without
-it, missing layers use weight reconstruction error; reports expose calibration
-coverage. Neither metric proves image quality.
-
-Capture from an existing eager baseline runner, mapping the actual modules to
-checkpoint weight keys:
+`--require-calibration` requires samples for every targeted layer. Otherwise,
+missing layers use weight reconstruction and the report exposes coverage. Capture
+from an existing eager baseline runner, mapping modules to checkpoint weight keys:
 
 ```python
-from calibration_capture import CalibrationCapture
+from native_quantizer.calibration_capture import CalibrationCapture
 
 with CalibrationCapture(selected_modules, rows=64, rows_per_call=4,
                         max_bytes=256 << 20, seed=0) as capture:
@@ -103,54 +68,40 @@ with CalibrationCapture(selected_modules, rows=64, rows_per_call=4,
 capture.save("activations.npz")
 ```
 
-Sampling covers calls/steps rather than only the first activation tensor. It
-copies selected rows to CPU during calibration. Capture is intentionally outside
-CUDA graph capture and normal inference; it is not itself a ComfyUI workflow
-runner. Choose representative prompts, resolutions and denoising steps in the
-owning baseline runner. A capture budget overflow fails explicitly.
+Capture samples calls and steps using a deterministic reservoir, transferring
+selected rows to CPU. Hooks exist only within the context manager and are removed
+on failure. A budget overflow fails explicitly. Capture runs outside CUDA graphs;
+it does not provide a workflow runner. Choose representative prompts, resolutions
+and denoising steps in the owning baseline runner. Ingestion checks finite values,
+widths, budgets and checkpoint-bound caches. Neither reconstruction metric proves
+image quality.
 
-## Runtime validation and measured policy
+## Runtime measurements
 
-```bash
-python benchmark_kitchen.py --comfy-root /path/to/ComfyUI \
+```sh
+quantizer-kitchen-benchmark --comfy-root /path/to/ComfyUI \
   --m 256 --n 1024 --k 4096 --repeats 30 > kernel-costs.json
-python comfyui_native_quantizer.py model.safetensors \
-  --format mixed --profile throughput --target-runtime nvidia \
-  --kernel-costs kernel-costs.json --output model-mixed.safetensors
+comfyquant --no-config model.safetensors --format mixed \
+  --profile throughput --target-runtime nvidia --kernel-costs kernel-costs.json \
+  --output model-mixed.safetensors --validate
 ```
 
-The probe forces Kitchen CUDA dispatch, tests native ComfyUI loading and device
-round-trip, compares outputs with independent runtime simulation, records first
-and warm timings and temporary allocator peak, then checks graph replay. These
-are synthetic linear tests, not full workflow throughput, LoRA/offload stress
-or generated-image quality tests.
+The CUDA probe tests native loading and device movement, independent output-error
+simulation, first/warm timings, temporary allocator peaks and graph replay.
+Simulation estimates quantization error; reduced-precision fused rotation can
+produce different tensors. Replay is compared exactly with the native forward.
+These synthetic checks do not establish full-workflow quality, latency, memory,
+dynamic-shape graph safety, patching or offload behavior.
 
-The FP32 activation simulation predicts quantization error; it is not a bit-exact
-reference for fused reduced-precision rotation. The probe checks agreement of
-output-error estimates and separately reports the difference between actual and
-simulated output tensors. Graph replay itself is checked against the native
-forward output exactly.
+Cost files are version-checked and shape-specific. Combine their `benchmarks`
+arrays to cover multiple N/K shapes, with representative M workloads. The probe
+uses BF16 activations and records workload shapes and the cost-file hash without
+device identity. Use measurements from the intended environment and workload;
+unmatched shapes use heuristics. `kitchen-costs/v2` keys grouped formats by group
+size. Files using v1 remain readable for formats other than W6A8.
 
-Cost files are version-checked and shape-specific; combine their `benchmarks`
-arrays for multiple weight shapes, with one representative M per N/K shape.
-The probe uses BF16 activations. Only supply costs measured on the intended
-inference device, software and workload. The converter cannot infer that a cost
-file from a different device or activation workload is representative. Unmatched
-shapes use the documented heuristic. Reports record workload shapes and the cost
-file hash. No device identity is written by the probe.
-
-```bash
-python -m unittest -q test_quantizer_native.py test_kitchen_pipeline.py
-python comfyui_native_quantizer.py --self-test
-```
-
-Kernel workspaces remain owned by Kitchen, and live input quantization still
-allocates activation/output buffers. This redesign avoids adding a competing
-runtime and does not claim to eliminate upstream allocations. Graph replay for
-fixed synthetic shapes does not establish graph safety across ComfyUI patching,
-dynamic shapes, lazy loading or offloading. Validate those with the actual model
-and workflow before deployment.
-
-W6A8 uses `kitchen-costs/v2` group-aware costs; v1 remains readable for previous
-formats. See [native W6A8](w6a8.md) for conversion and probe examples, dependency
-gates and the upstream odd-row CUDA graph limitation.
+Streaming serialization, independent decoding, quality gates, resume integrity
+and atomic publication apply to mixed conversion. Kernel workspaces and live
+activation/output allocations remain owned by Kitchen. See [W6A8](w6a8.md) for
+six-bit requirements and the observed odd-row graph limitation, and
+[validation](release-validation.md) for required checks.

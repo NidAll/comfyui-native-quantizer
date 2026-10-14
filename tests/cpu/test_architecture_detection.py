@@ -8,7 +8,7 @@ import io
 import json
 import tempfile
 import unittest
-from tests_support import isolated_module as setUpModule, comfyui_root
+from tests.support import isolated_module as setUpModule, comfyui_root
 from pathlib import Path
 
 import safetensors.torch

@@ -71,6 +71,8 @@ from native_quantizer.metadata import (
     serialized_quant_metadata,
 )
 from native_quantizer.options import ConversionOptions
+from native_quantizer.optimization import (OptimizationConfig, calibration_digest,
+                                          check_optimization_calibration, read_optimization_metadata)
 from native_quantizer.planning.classification import _emit_plan_layers, classify_tensors
 from native_quantizer.planning.metrics import SensitivityAnalyzer
 from native_quantizer.planning.mixed import MixedPlanner
@@ -206,6 +208,7 @@ def _check_runtime_compatibility(env: EnvironmentInfo,
 def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
                    argument_error: Optional[Callable[[str], None]] = None) -> int:
     args = dataclasses.replace(options)
+    optimization = OptimizationConfig.from_options(args)
     if argument_error is None:
         def argument_error(message: str) -> None:
             raise UsageError(message)
@@ -349,6 +352,11 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         else:
             argument_error(f"--format must be w4a8, w6a8 or mixed, got {args.format!r}")
         plan = plan_from_output(args.output, detection, fmt, info)
+        with RawSafetensorsFile(args.output) as raw:
+            record = json.loads(raw.metadata.get(METADATA_KEY_EXT, '{}')).get('optimization')
+        stored = read_optimization_metadata(record)
+        args.optimizer, args.mse_objective = stored.mode, stored.objective
+        args.mse_steps, args.mse_iterations = stored.steps, stored.iterations
         validator = Validator(info, plan, args.output, args, env)
         validation_input_hashes = hash_checkpoint_files(info)
         with CheckpointReader(info) as validation_reader:
@@ -525,6 +533,10 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         calibration = load_calibration(args.calibration_source, info,
                                        args.calibration_samples, args.calibration_cache,
                                        args.max_memory)
+    if optimization.enabled:
+        check_optimization_calibration(optimization, calibration, decisions, args.require_calibration)
+        args._optimization_calibration = calibration
+        args._optimization_calibration_digest = calibration_digest(calibration)
     if fmt == FORMAT_W6A8:
         if args.require_calibration:
             missing = [d.name for d in decisions if d.kind == DecisionKind.QUANTIZE
@@ -590,7 +602,8 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             seed=args.seed,
             codebook_mode=args.codebook_mode,
             objective=args.mixed_objective, kernel_costs=costs,
-            enable_w6a8=args.enable_w6a8, w6a8_group_size=args.w6a8_group_size)
+            enable_w6a8=args.enable_w6a8, w6a8_group_size=args.w6a8_group_size,
+            optimization=optimization)
         if args.require_runtime_certificate and certificate is None:
             raise RuntimeCompatibilityError(
                 "--require-runtime-certificate needs --runtime-certificate "
@@ -644,7 +657,7 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         apply_sensitivity_prepass(info, decisions, sensitivity, args.max_memory,
                                   effective_device, compute_dtype,
                                   seed=args.seed,
-                                  codebook_mode=args.codebook_mode)
+                                  codebook_mode=args.codebook_mode, optimization=optimization)
         kept_by_sensitivity = sum(1 for m in sensitivity.results.values() if m.kept)
         if kept_by_sensitivity:
             warnings.append(
@@ -668,7 +681,7 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     plan.n_kept = len(decisions) - plan.n_quantized
     plan.chunked_layers = {
         d.name for d in plan.quantized_layers()
-        if _quant_work_bytes(info.by_name(d.name), d.format) > args.max_memory
+        if _quant_work_bytes(info.by_name(d.name), d.format, optimization) > args.max_memory
     }
     plan.metadata_quant = build_quant_metadata(info, plan)
 
@@ -758,8 +771,8 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             engine.save_state()
         finally:
             engine.close()
-        log().error("conversion failed; state saved to %s (rerun with --resume)",
-                    state_path)
+        log().error("conversion failed; journal %s at %s",
+                    'saved' if engine._journal_writable else 'left unchanged', state_path)
         raise
     engine.close()
     input_hashes = engine.input_hashes

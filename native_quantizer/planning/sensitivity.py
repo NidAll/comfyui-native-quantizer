@@ -29,7 +29,7 @@ def apply_sensitivity_prepass(info: CheckpointInfo,
                               max_mem: int, device: torch.device,
                               compute_dtype: Optional[torch.dtype],
                               seed: int = 0,
-                              codebook_mode: str = "auto") -> None:
+                              codebook_mode: str = "auto", optimization=None) -> None:
     """Freeze sensitivity decisions before the safetensors inventory is built."""
     with CheckpointReader(info) as reader:
         for decision in decisions:
@@ -41,22 +41,23 @@ def apply_sensitivity_prepass(info: CheckpointInfo,
                     f"sensitivity plan references missing tensor {decision.name!r}")
             activations = None
             if analyzer.calibration is not None:
-                layer_stats = analyzer.calibration.layers.get(decision.name)
+                layer_stats = (analyzer.calibration.layers.get(decision.name)
+                               or analyzer.calibration.layers.get(decision.layer))
                 if layer_stats is not None:
                     activations = layer_stats["samples"]
             if decision.format == FORMAT_W6A8:
                 scorer = MixedPlanner("conservative", analyzer.calibration, max_mem, device,
                                       compute_dtype, enable_w6a8=True,
-                                      w6a8_group_size=decision.group_size)
+                                      w6a8_group_size=decision.group_size, optimization=optimization)
                 metrics = scorer._evaluate_format(reader, decision, FORMAT_W6A8)
                 metrics.name = decision.name
                 analyzer.results[decision.name] = metrics
-            elif _quant_work_bytes(meta) <= max_mem:
+            elif _quant_work_bytes(meta, optimization=optimization) <= max_mem:
                 quantized = quantize_tensor_bounded(
                     reader, decision.name, FORMAT_W4A8, decision.group_size,
                     decision.convrot_groupsize, max_mem, device,
                     compute_dtype=compute_dtype, seed=seed,
-                    codebook_mode=codebook_mode)
+                    codebook_mode=codebook_mode, optimization=optimization, activations=activations)
                 dequant = dequantize_weight_by_format(
                     quantized, FORMAT_W4A8, decision.group_size,
                     decision.convrot_groupsize, torch.float32)
@@ -65,7 +66,7 @@ def apply_sensitivity_prepass(info: CheckpointInfo,
                 del quantized, dequant
             else:
                 n, k = int(meta.shape[0]), int(meta.shape[1])
-                chunk_rows = _chunk_rows_for_budget(k, n, max_mem)
+                chunk_rows = _chunk_rows_for_budget(k, n, max_mem, optimization=optimization)
                 sample_size = _codebook_sample_size(n * k)
                 codebook = _gather_codebook_samples(
                     reader, decision.name, k, decision.group_size,
@@ -79,7 +80,8 @@ def apply_sensitivity_prepass(info: CheckpointInfo,
                         reader, decision.name, r0, r1, decision.group_size,
                         decision.convrot_groupsize, codebook, device, compute_dtype,
                         als_iterations=(3 if codebook_mode == "fit"
-                                        else W4A8_ALS_ITERS))
+                                        else W4A8_ALS_ITERS), optimization=optimization,
+                        activations=activations)
                     dequant = dequantize_weight_by_format(
                         quantized, FORMAT_W4A8, decision.group_size,
                         decision.convrot_groupsize, torch.float32)

@@ -16,7 +16,7 @@ from native_quantizer.cli.entrypoint import entrypoint
 from native_quantizer.errors import OutputError, UsageError
 from native_quantizer import api, events
 from native_quantizer.options import ConversionOptions
-from tests_support import isolated_module as setUpModule
+from tests.support import isolated_module as setUpModule
 
 
 class CliSafetyTests(unittest.TestCase):

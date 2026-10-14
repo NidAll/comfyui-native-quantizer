@@ -1,4 +1,0 @@
-# Optional: remote safetensors downloads.
-huggingface-hub>=0.24,<2
-# Optional native layouts; W6A8 requires the explicit six-bit API.
-comfy-kitchen>=0.2.36,<0.3

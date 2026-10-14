@@ -1,230 +1,183 @@
 # ComfyUI Native Quantizer
 
-Native checkpoint conversion for ComfyUI, with a modular Python API, streaming
-I/O, precision policies, independent verification and a command-line interface.
+A CLI and Python library for converting diffusion checkpoints and text encoders
+to native ComfyUI quantization formats. It selects eligible weights by architecture,
+preserves sensitive tensors, converts within a working-memory budget, and validates
+reconstruction before publishing the output.
 
-**Current candidate: 2.3.0rc2.** See the [changelog](CHANGELOG.md),
-[support and evidence matrix](docs/support.md) and [V2 migration guide](docs/migration-v2.md).
-This candidate establishes the maintained modular base. Architecture policy
-coverage does not certify generation quality or accelerated execution for every model.
+Optional MSE optimization searches scales and clipping on each format's actual
+numerical grid. Inference uses the existing ComfyUI/Kitchen layouts and kernels.
+The target model architecture must be supported by your ComfyUI installation;
+some architectures require their own native extensions.
 
-Convert compatible ComfyUI checkpoints and text encoders to ComfyUI's native
-quantized safetensors formats. The converter streams large
-files, preserves unsupported tensors, and validates its output before publishing
-it.
+## Installation
 
-It does not modify ComfyUI core and does not produce GGUF, GPTQ, bitsandbytes,
-AWQ, or other custom-loader formats.
+Use Python 3.12–3.13 with your intended PyTorch build already installed. From this
+checkout, install the package and native-layout dependency:
+
+```sh
+python -m pip install '.[kitchen]'
+comfyquant --version
+comfyquant --no-config --list-formats
+```
+
+You can also install a release wheel with `python -m pip install /path/to/package.whl`.
+PyTorch is supplied by your environment. Add the `hub` extra for Hugging Face
+inputs, or `dev` for development and packaging tools. See the
+[installation guide](docs/linux-cli.md) for command paths, completions and defaults.
 
 ## Quick start
 
-Use Python 3.12–3.13 in an environment that already supplies a compatible
-PyTorch build. Choose PyTorch for your backend using its
-[official installation guide](https://pytorch.org/get-started/locally/).
-PyTorch is intentionally supplied by the environment, so installing the
-quantizer does not replace a working ComfyUI compute stack.
-
-From a source checkout:
+Inspect the checkpoint and preview the selected layers:
 
 ```sh
-python -m pip install -e .
-comfyquant --no-config --list-formats
-comfyquant model.safetensors --inspect
-comfyquant model.safetensors --format int8 --dry-run
-comfyquant model.safetensors --format int8 --output model-int8.safetensors \
-  --max-memory 512M --validate
-comfyquant --verify-output model-int8.safetensors
+comfyquant --no-config input.safetensors --inspect
+comfyquant --no-config input.safetensors --format int8-convrot --dry-run
 ```
 
-Install optional native layout and Hub dependencies only when needed:
+Convert, validate against the source, then verify the serialized output:
 
 ```sh
-python -m pip install -e '.[kitchen,hub]'
+comfyquant --no-config input.safetensors --format int8-convrot \
+  --output output-int8.safetensors --max-memory 512M --validate
+comfyquant --no-config --verify-output output-int8.safetensors
 ```
 
-Built distributions can be installed with `python -m pip install path/to/wheel.whl`.
-There is no PyPI publication implied by this source release.
+The source is preserved. Replacing an output requires `--overwrite`. Unsupported
+shapes and protected tensors keep their source precision. Review the dry-run and
+report for actual coverage; a format name does not guarantee native acceleration
+on every consumer, shape or backend.
 
-For user-local commands, XDG defaults and Fish/Bash/Zsh completion, see
-[Linux integration](docs/linux-cli.md). Catalog commands start without PyTorch.
+## MSE optimization
 
-The input is never overwritten. Use `--overwrite` only when replacing an
-existing output is intentional.
+Enable `--optimizer mse` for eligible quantized weights in any registered
+architecture. The default remains `--optimizer none`. The original encoding is
+always considered, and the optimizer retains it when no valid candidate improves
+the selected objective.
 
-## Native formats
+For Z-Image INT4 ConvRot with weight reconstruction MSE:
 
-| CLI format | ComfyUI algorithm | Use |
-| --- | --- | --- |
-| `int8` | `int8_tensorwise` | Row-wise INT8 weights |
-| `int8-convrot` | `int8_tensorwise` | INT8 weights with ConvRot metadata |
-| `w4a4` | `convrot_w4a4` | Packed 4-bit weights |
-| `int4-convrot` | `convrot_w4a4` | Packed 4-bit weights with an INT4 execution request |
-| `w4a8` | `asym_w4a8_int8` | 4-bit weights with INT8 activations |
-| `w6a8` | `w6a8_int8` | Uniform 6-bit weights with INT8 activations; Kitchen >= 0.2.36 |
-| `mixed` | Per-layer native formats | Kitchen-aware W4A8/W4A4/INT8 selection; W6A8 opt-in |
-| `fp8-e4m3` | `float8_e4m3fn` | Tensor-scaled FP8 |
-| `fp8-e5m2` | `float8_e5m2` | Tensor-scaled FP8 |
-| `nvfp4` | `nvfp4` | Comfy-kitchen NVFP4 layout |
-| `mxfp8` | `mxfp8` | Comfy-kitchen MXFP8 layout |
-| `fp16`, `bf16` | — | Precision conversion without quantization |
-
-Prefixed checkpoints use native per-layer `.comfy_quant` tensors and an empty
-header layer map. This avoids duplicate metadata warnings when ComfyUI removes
-the model prefix. Bare checkpoints retain header metadata. Verification and
-validation support both representations; no ComfyUI changes are required.
-
-The serialized format and accelerated execution are separate concerns. ComfyUI,
-comfy-kitchen, the selected loader, and the target runtime determine which
-kernel is used. Unsupported accelerated formats remain selectable and produce a
-warning when the runtime capability is known.
-
-Comfy-kitchen also contains AWQ W4A16 and SVDQuant W4A4 layouts. They are not
-registered as native loadable algorithms by stock ComfyUI, so this project does
-not emit them.
-
-Mixed mode now budgets runtime weight expansion as well as storage and error.
-Use `--profile throughput` for more INT8 headroom, and `--kernel-costs` for
-shape-specific measured selection. See the [pipeline guide](docs/kitchen-pipeline.md)
-for calibration capture, layout contracts, validation and limits.
-
-W6A8 defaults to group size 16. Use `--enable-w6a8` to add it to mixed
-planning; the opt-in is off by default. See the [W6A8 guide](docs/w6a8.md) for
-packing, compatibility, examples, validation and runtime limits.
-
-## Architecture support
-
-Iris-3B has its own fused/unfused trunk and pixel-head policy, with native Iris
-loader validation and conservative shape guards. Kandinsky 6 Lite/Pro video/audio
-and Kandinsky 6 SR have separate native-layout policies. See the
-[Iris guide](docs/iris.md) and [Kandinsky 6 guide](docs/kandinsky6.md) for loader
-requirements, preserved boundaries and supported checkpoint namespaces.
-
-
-Built-in policies cover a broad range of ComfyUI diffusion, video, audio, and
-text-encoder architectures, including experimental native ACE-Step 1.5 support,
-Flux-family models, MiniMax, LTXV/LTXAV, YuE2, Trellis2, Qwen text encoders,
-T5, and CLIP. Qwen-Image 2.1 has an experimental native policy; see the
-[format guide](docs/qwen-image-2.1.md). Ming-Image Design and Design-Layer
-ComfyUI checkpoints and their Ling Mini text encoders also have experimental
-policies; see the [Ming-Image guide](docs/ming-image.md). Run
-`--list-architectures` for the authoritative current list.
-
-Detection uses checkpoint tensor names and shapes, rather than filenames.
-Z-Image (`z_image`), pixel-space Z-Image (`z_image_pixel_space`), and Lumina2
-have separate policies and architecture labels. The same distinction applies
-to HunyuanDiT1, Chroma Radiance, LTXAV, PixArt Sigma, PiD, and SAM31. Class
-names such as `--architecture ZImage` work as aliases. Automatic detection
-rejects incomplete or ambiguous signatures; use `--inspect` to review them
-before choosing an override. Input/output projections, embeddings, norms,
-modulation, and pixel-space decoders remain at source precision.
-
-## Text encoders
-
-Use `--components text_encoder` to select a text-encoder checkpoint:
-
-```bash
-python comfyui_native_quantizer.py text_encoder.safetensors \
-  --components text_encoder \
-  --format int8 \
-  --output text_encoder-int8.safetensors
+```sh
+comfyquant --no-config z-image.safetensors --architecture z_image \
+  --format int4-convrot --optimizer mse --mse-objective weight \
+  --device auto --max-memory 512M --output z-image-int4-mse.safetensors --validate
 ```
 
-Token embeddings remain unchanged by default. Opt in to row-wise INT8 token
-embedding lookup with:
+For mixed precision with recorded activations:
 
-```bash
-python comfyui_native_quantizer.py text_encoder.safetensors \
-  --components text_encoder \
-  --format int8 \
-  --quantize-text-embeddings \
-  --output text_encoder-int8.safetensors
+```sh
+comfyquant --no-config input.safetensors --format mixed --profile balanced \
+  --optimizer mse --mse-objective activation \
+  --calibration-source activations.npz --require-calibration \
+  --max-memory 512M --output output-mixed.safetensors --validate
 ```
 
-The embedding option is supported with `int8`, `int8-convrot`, and `mixed`.
-Embeddings use plain INT8 even when linears use another INT8 variant. Positional
-embeddings, output heads, vision/audio towers, and expert banks remain at source
-precision.
+| Objective | Selection |
+| --- | --- |
+| `weight` | Minimize weight reconstruction error |
+| `activation` | Minimize reconstructed-weight output error on recorded activation rows; complete coverage required |
+| `auto` (default) | Use activation error where samples exist and weight error elsewhere |
 
-## Input sources
+`--mse-steps` controls applicable scale/clipping searches; `--mse-iterations`
+controls applicable least-squares refinement. Searches respect integer rounding,
+FP8 scale storage and block-format representations. Improvement depends on the
+weights, format and objective; reconstruction MSE does not establish image quality.
+See [MSE optimization](docs/mse-optimization.md) for controls, calibration,
+benchmarks and numerical limits.
 
-The converter accepts local safetensors files, indexed shards, model
-directories, and explicitly trusted local pickle checkpoints. Hugging Face
-inputs are pinned to a resolved revision and only the requested component is
-downloaded.
+## Formats
 
-## Useful commands
+| Format | Stored weights and execution request |
+| --- | --- |
+| `int8`, `int8-convrot` | INT8 with FP32 row scales; optional ConvRot |
+| `w4a4` | Packed INT4 with FP32 row scales; INT8 execution request by default |
+| `int4-convrot` | Packed INT4 with ConvRot and an INT4 execution request |
+| `w4a8` | Codebook INT4 with FP8 group scales and FP32 channel scales; INT8 decode grid |
+| `w6a8` | Uniform six-bit weights with FP8 group scales and FP32 channel scales; INT8 decode grid |
+| `mixed` | Per-layer W4A4/W4A8/INT8; W6A8 added with `--enable-w6a8` |
+| `fp8-e4m3`, `fp8-e5m2` | FP8 with one FP32 tensor scale |
+| `nvfp4` | E2M1 values, E4M3 block scales and an FP32 tensor scale |
+| `mxfp8` | E4M3 values and E8M0 block scales |
+| `fp16`, `bf16` | Precision casts; no MSE quantization-scale optimization |
 
-```bash
-# List built-in architecture policies
-python comfyui_native_quantizer.py --list-architectures
+W6A8 requires Kitchen's explicit six-bit API and native ComfyUI registration.
+Block formats require compatible layout APIs; accelerated inference needs an
+appropriate backend. See [support](docs/support.md) and [W6A8](docs/w6a8.md).
 
-# Check a completed native output
-python comfyui_native_quantizer.py --verify-output model-int8.safetensors
+## Architecture and input coverage
 
-# Run the regression suite
-python scripts/check.py
+List policies with `comfyquant --no-config --list-architectures`. Detection uses
+tensor names and shapes, with separate policies for distinct model variants.
+`--architecture NAME` provides an explicit override. Include/exclude controls
+still obey shape, precision and consumer safeguards.
 
-# Generate a data-only policy for an architecture not yet listed
-python comfyui_native_quantizer.py --write-architecture-template my-model.json
+Inputs can be safetensors files, indexed shards or model directories. Pickle
+input requires `--trust-pickle`. Hugging Face input requires the `hub` extra and
+explicit download options; `--offline` prevents model downloads.
+
+Use `--components text_encoder` for supported text towers. Token embeddings stay
+at source precision unless explicitly enabled with `--quantize-text-embeddings`
+for supported INT8/mixed paths. Norms, modulation, input/output boundaries and
+protected auxiliary towers retain their architecture policies.
+
+`--max-memory` budgets temporary conversion work, excluding mmap pages, framework
+overhead and allocator caches. W4A8, W6A8 and mixed conversions support matching
+resume journals. Other formats restart atomically. NVFP4/MXFP8 require a sufficient
+whole-layer budget. These limits describe conversion, not inference VRAM.
+
+## Python API
+
+```python
+from native_quantizer import api
+from native_quantizer.options import ConversionOptions
+
+status = api.convert(ConversionOptions(
+    model="input.safetensors", output="output.safetensors",
+    format="int8-convrot", optimizer="mse", mse_objective="weight",
+    max_memory="512M", validate=True,
+))
+verification = api.verify_output("output.safetensors")
 ```
 
-Use `--include`, `--exclude`, and `--keep-precision` for narrow layer
-overrides. A custom policy is data-only and does not install a model loader;
-the target ComfyUI architecture must already understand the tensor names and
-metadata.
-
-`--runtime-certificate` accepts a JSON certificate from observed native load
-and forward execution on the target backend. Static capability checks alone do
-not qualify as certification.
-
-## Design boundaries
-
-- Conversion is local and deterministic for the same backend, options, and input.
-- Unsupported tensors pass through unchanged.
-- Quantization uses reconstruction gates; a layer that fails its gate stays at
-  source precision.
-- Memory limits control temporary conversion work, not total process RSS.
-- Output publication is atomic and output validation runs before the final path
-  is made visible.
+API requests are explicit and do not read CLI preferences. See
+[architecture and API](docs/architecture.md) for operations and module ownership.
 
 ## Project layout
 
 ```text
-comfyui_native_quantizer.py   compatibility CLI and Python facade
-native_quantizer/
-  api.py, options.py         public operations and conversion requests
-  application.py            conversion orchestration
-  checkpoint_io/            discovery, shards, streaming reads/writes
-  architectures/            detection and precision-preservation policies
-  codecs/, formats.py       native encoding, packing and layout contracts
-  planning/                 metrics, sensitivity and mixed selection
-  execution/                conversion engines and resume journals
-  runtime/                  Kitchen probes, capabilities and measured costs
-  validation/               independent reconstruction and output checks
-  cli/                      arguments, commands and process exit handling
-  testing/                  on-demand regression suite and reference fixtures
-pyproject.toml               CLI/library packaging
+native_quantizer/   CLI/library implementation and packaged self-test fixtures
+tests/            Regression suites (cpu/, cuda/) and shared support
+scripts/          Checks, installed smoke, benchmarks and Linux setup
+docs/             Usage, numerical contracts, support and release guides
+docs/models/      Architecture-specific conversion guides
+skills/           Architecture contributor workflow
+.github/          CI and contribution templates
 ```
 
-The original script remains supported. The equivalent module command is
-`python -m native_quantizer`. An editable core install with
-`python -m pip install -e .` also provides `comfyui-native-quantizer`.
-Use the Python environment that already supplies the intended PyTorch build.
+The root Python entry points remain thin compatibility interfaces. Maintained
+implementation lives in `native_quantizer/`; dependencies are declared in
+`pyproject.toml`. Generate a custom architecture starter with
+`comfyquant --no-config --write-architecture-template policy.json`.
 
-See [docs/architecture.md](docs/architecture.md) for ownership, dependency rules,
-Python API examples and regression commands. Conversion algorithms and format
-contracts retain their existing behavior.
+## Documentation and development
 
-## Development and releases
+- [Installation and configuration](docs/linux-cli.md)
+- [MSE objectives and benchmarks](docs/mse-optimization.md)
+- [Mixed precision, calibration and runtime costs](docs/kitchen-pipeline.md)
+- [Iris](docs/models/iris.md), [Kandinsky 6](docs/models/kandinsky6.md),
+  [Ming-Image](docs/models/ming-image.md), [Qwen-Image 2.1](docs/models/qwen-image-2.1.md)
+- [Support](docs/support.md) and [validation](docs/release-validation.md)
+- [Contributing](CONTRIBUTING.md), [release process](docs/releasing.md) and [changelog](CHANGELOG.md)
 
-[CONTRIBUTING.md](CONTRIBUTING.md) describes reproducible checks and code ownership.
-Default checks use synthetic fixtures and isolated preferences. Studio is deferred and excluded from this release. ComfyUI integration
-is explicitly configured with `COMFYUI_ROOT`; CUDA checks are a separate required
-run when selected. No check downloads model weights or starts ComfyUI services.
+```sh
+python scripts/check.py
+python scripts/check.py --comfy-root /path/to/ComfyUI --cuda
+```
 
-The [release guide](docs/releasing.md) covers source review, distribution builds,
-installed-package smoke checks, checksums and promotion from candidate to stable.
-This release ships one CLI/library wheel and one source archive containing
-the CLI guides and checks.
+Default checks use CPU fixtures with isolated preferences. Requested consumer and
+CUDA checks fail when prerequisites are missing. Synthetic tests establish
+serialization, numerical and consumer contracts; model quality, workflow latency,
+offload and adapters need separate evaluation. Development checks do not download
+model weights or start services.
 
 Licensed under [Apache-2.0](LICENSE).

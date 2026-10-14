@@ -62,12 +62,15 @@ def main() -> int:
             assert 'native_quantizer/cli/entrypoint.py' in files
             if is_wheel:
                 assert not any(file.startswith('quantizer_tui/') for file in files)
-                assert 'tests_support.py' not in files
+                assert not any(file.startswith('tests/') for file in files)
                 assert not any('textual' in dep for dep in metadata.get_all('Requires-Dist', []))
             else:
                 for required in ('scripts/install_linux.py', 'scripts/check.py', 'scripts/smoke_installed.py',
-                                 'docs/support.md', 'docs/releasing.md', 'test_project_structure.py',
-                                 'tests_support.py', 'test_added_architectures.py', 'docs/iris.md'):
+                                 'docs/support.md', 'docs/releasing.md', 'tests/cpu/test_project_structure.py',
+                                 'tests/support.py', 'tests/cpu/test_added_architectures.py', 'docs/models/iris.md',
+                                 'tests/__init__.py', 'tests/cpu/__init__.py', 'tests/cuda/__init__.py',
+                                 'tests/cpu/test_mse_optimization.py', 'tests/cuda/test_mse_cuda.py',
+                                 'tests/cuda/test_w6a8_cuda.py'):
                     assert required in files, required
         print(f'{path.name}: archive contract passed ({len(files)} files)')
         checksums.append(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')

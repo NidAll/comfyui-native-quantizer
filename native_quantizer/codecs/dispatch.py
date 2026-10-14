@@ -9,6 +9,7 @@ from native_quantizer.codecs.int8 import dequantize_int8_tensorwise_weight, quan
 from native_quantizer.codecs.w4a4 import dequantize_w4a4_weight, quantize_w4a4_weight
 from native_quantizer.codecs.w4a8 import dequantize_w4a8_weight, quantize_w4a8_weight
 from native_quantizer.codecs.w6a8 import dequantize_w6a8_weight, validate_w6_shape, validate_w6_tensors
+from native_quantizer.codecs.rotation import rotate_int8_convrot_weight
 from native_quantizer.errors import PolicyError
 from native_quantizer.identity import FORMAT_INT8, FORMAT_W4A4, FORMAT_W4A8, FORMAT_W6A8
 from native_quantizer.runtime.kitchen import require_w6a8_api
@@ -18,6 +19,7 @@ def quantize_weight_by_format(weight: torch.Tensor, fmt: str, group_size: int,
                               convrot_groupsize: int,
                               seed: int = 0,
                               codebook_mode: str = "auto",
+                              optimization=None, activations=None,
                               ) -> Dict[str, torch.Tensor]:
     """Quantize with the W4A8 layout; returns the per-layer output tensors
     keyed by suffix ('' for the packed weight, '_s_rel', '_s_channel',
@@ -33,6 +35,11 @@ def quantize_weight_by_format(weight: torch.Tensor, fmt: str, group_size: int,
             convrot_groupsize=convrot_groupsize, bits=6, symmetric=True,
             scale_dtype=torch.float8_e4m3fn, codebook=False, scale_search=True)
         out = layout.state_dict_tensors(packed, params)
+        if optimization is not None and optimization.enabled:
+            from native_quantizer.codecs.optimization import optimize_grouped
+            rotate = lambda x: rotate_int8_convrot_weight(x, convrot_groupsize)
+            out = optimize_grouped(rotate(weight.float()), out, fmt, group_size,
+                                   optimization, activations, rotate)
         validate_w6_tensors(out, group_size, convrot_groupsize, weight.shape)
         return out
     if fmt == FORMAT_W4A8:
@@ -43,12 +50,17 @@ def quantize_weight_by_format(weight: torch.Tensor, fmt: str, group_size: int,
         out = {"": packed, "_s_rel": s_rel, "_s_channel": s_ch, "_codebook": cb}
         if corr is not None:
             out["_correction"] = corr
+        if optimization is not None and optimization.enabled:
+            from native_quantizer.codecs.optimization import optimize_grouped
+            rotate = lambda x: rotate_int8_convrot_weight(x, convrot_groupsize)
+            out = optimize_grouped(rotate(weight), out, fmt, group_size,
+                                   optimization, activations, rotate)
         return out
     if fmt == FORMAT_INT8:
-        q, scale = quantize_int8_tensorwise_weight(weight)
+        q, scale = quantize_int8_tensorwise_weight(weight, optimization, activations)
         return {"": q, "_scale": scale}
     if fmt == FORMAT_W4A4:
-        packed, scale = quantize_w4a4_weight(weight, convrot_groupsize)
+        packed, scale = quantize_w4a4_weight(weight, convrot_groupsize, optimization, activations)
         return {"": packed, "_scale": scale}
     raise PolicyError(f"unknown quantization format {fmt!r}")
 

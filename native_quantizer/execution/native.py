@@ -18,6 +18,7 @@ from typing import Any, Dict, Tuple
 from native_quantizer import events
 from native_quantizer.architectures.detection import DetectionResult
 from native_quantizer.architectures.policies import TEXT_TOKEN_EMBEDDING
+from native_quantizer.calibration import load_calibration
 from native_quantizer.checkpoint_io.fingerprints import _portable_hash_manifest, hash_checkpoint_files
 from native_quantizer.checkpoint_io.reader import CheckpointReader
 from native_quantizer.checkpoint_io.types import CheckpointInfo
@@ -48,6 +49,8 @@ from native_quantizer.identity import (
 )
 from native_quantizer.logging import log
 from native_quantizer.metadata import inline_quant_metadata, serialized_quant_metadata
+from native_quantizer.optimization import (OptimizationConfig, calibration_digest,
+                                          check_optimization_calibration, layer_activations)
 from native_quantizer.planning.classification import _emit_plan_layers, classify_tensors
 from native_quantizer.planning.types import DecisionKind
 from native_quantizer.runtime.capabilities import warn_native_gpu
@@ -59,10 +62,16 @@ from native_quantizer.validation.native import verify_native_output
 
 def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) -> int:
     spec = NATIVE_FORMATS[args.format]
+    optimization = OptimizationConfig.from_options(args)
+    if optimization.enabled and spec.algorithm is None:
+        raise UsageError('MSE optimization applies to quantized formats; FP16/BF16 casts have no scale to optimize')
     events.emit('phase', phase='planning')
     warn_native_gpu(args)
     # Refuse controls belonging to the legacy planner instead of silently ignoring them.
     for option in NATIVE_UNSUPPORTED_OPTIONS:
+        if optimization.enabled and option in ('calibration_source', 'calibration_cache',
+                                               'calibration_samples', 'require_calibration'):
+            continue
         if getattr(args, option, None) is not None and getattr(args, option) is not False:
             raise UsageError(f'--{option.replace("_", "-")} is a W4A8/mixed-engine option; '
                              'native formats use streamed weight-error gates and atomic restart')
@@ -124,6 +133,12 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
         return 0
     if spec.algorithm and not planned:
         raise PolicyError('no eligible linears; inspect the model and supply a matching architecture policy')
+    calibration = None
+    if optimization.enabled and args.calibration_source:
+        calibration = load_calibration(args.calibration_source, info, args.calibration_samples,
+                                       args.calibration_cache, args.max_memory)
+    if optimization.enabled:
+        check_optimization_calibration(optimization, calibration, decisions, args.require_calibration)
     out = os.path.abspath(args.output)
     parent = os.path.dirname(out)
     os.makedirs(parent, exist_ok=True)
@@ -175,22 +190,31 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                                                torch.finfo(torch.float8_e4m3fn if spec.cli == 'fp8-e4m3'
                                                            else torch.float8_e5m2).max)
                                 scale = torch.tensor(max(maximum / denominator, 1e-30), device=device)
-                            if kitchen and m.nbytes * 48 > args.max_memory:
+                            kitchen_work = max(m.nbytes * 48, math.prod(m.shape) * 256 if optimization.enabled else 0)
+                            if kitchen and kitchen_work > args.max_memory:
                                 raise UsageError(f'{m.name}: swizzled {spec.cli} packing needs a whole-layer '
-                                                 f'budget of about {human_bytes(m.nbytes * 48)}; '
+                                                 f'budget of about {human_bytes(kitchen_work)}; '
                                                  'increase --max-memory or use INT8/FP8/W4A4')
                             row_budget = args.max_memory - (convrot * convrot * 4 if convrot and args.rotation_backend == 'matrix' else 0)
-                            if row_budget < m.shape[1] * 96:
+                            if row_budget < m.shape[1] * (256 if optimization.enabled else 96):
                                 raise UsageError('rotation and row workspace exceed budget; increase --max-memory or use --rotation-backend butterfly')
+                            activations = layer_activations(calibration, m.name)
+                            if optimization.enabled and layer_spec.cli.startswith('fp8-') and finite:
+                                from native_quantizer.codecs.optimization import tensor_scale_search
+                                dtype = torch.float8_e4m3fn if layer_spec.cli == 'fp8-e4m3' else torch.float8_e5m2
+                                scale = tensor_scale_search(
+                                    lambda: _native_rows(reader, m, row_budget, device, optimization),
+                                    scale, dtype, optimization, activations)
                             chunks = ([reader.read_tensor(m.name).to(device=device, dtype=torch.float32, copy=True)] if kitchen else
-                                      _native_rows(reader, m, row_budget, device)) if finite else ()
+                                      _native_rows(reader, m, row_budget, device, optimization)) if finite else ()
                             squared_error, squared_weight = 0.0, 0.0
                             for row in chunks:
                                 if not bool(torch.isfinite(row).all()):
                                     finite = False
                                     break
                                 w = row
-                                payload, reconstructed = _native_encode(w, layer_spec, scale, convrot, kitchen, args.rotation_backend)
+                                payload, reconstructed = _native_encode(w, layer_spec, scale, convrot, kitchen, args.rotation_backend,
+                                                                        optimization, activations)
                                 reconstructed_finite, error_sum, weight_sum = torch.stack((
                                     torch.isfinite(reconstructed).all().to(torch.float64),
                                     (w - reconstructed).double().square().sum(),
@@ -218,6 +242,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                             error = math.sqrt(squared_error / max(squared_weight, 1e-300))
                             accepted = finite and error <= gate
                             metrics[m.name] = {'relative_l2': error if finite else None,
+                                               'optimization_objective': ('activation' if activations is not None and optimization.objective != 'weight' else 'weight') if optimization.enabled else None,
                                                'accepted': accepted,
                                                'reason': 'quality gate passed' if accepted else
                                                          ('nonfinite source' if not finite else 'weight error exceeds gate')}
@@ -274,6 +299,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                         spool.append(f'{layer}.{LAYER_CONF_KEY}', torch.uint8, (len(data),), fragment)
             metadata['_quantization_metadata'] = json_dumps(serialized_quant_metadata({'layers': layers}))
             provenance = {'engine': NATIVE_ENGINE_REVISION, 'converter_version': get_converter_version(),
+                          'optimization': {**optimization.to_dict(), 'calibration_digest': calibration_digest(calibration)},
                           'format': spec.cli, 'architecture': detection.architecture,
                           'quant_metadata_transport': 'inline' if inline_quant_metadata(layers) else 'header',
                           'layer_shapes': {d.layer: list(info.by_name(d.name).shape) for d in decisions if d.layer in layers},
@@ -286,6 +312,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                           'rotation': ('regular-h4-' + args.rotation_backend + '-fp32-v1') if (spec.algorithm == FORMAT_W4A4 or spec.cli == 'int8-convrot') else None,
                           'torch_version': torch.__version__,
                           'kitchen_version': importlib.metadata.version('comfy-kitchen') if kitchen else None,
+                          'encoding_backend': 'kitchen-eager-fp32' if kitchen else 'torch-fp32',
                           'memory_budget': args.max_memory,
                           'runtime_verified': False,
                           'offloading': 'ComfyUI controls residency and transfers; no offload scheduler is embedded'}

@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests_support import comfyui_root, isolated_module as setUpModule
+from tests.support import comfyui_root, isolated_module as setUpModule
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReleaseContracts(unittest.TestCase):

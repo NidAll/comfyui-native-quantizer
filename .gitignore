@@ -18,7 +18,7 @@ validation_report.json
 *.bin
 *.gguf
 
-# Preserve the previous local version without publishing it
+# Exclude obsolete local compatibility copies and duplicate documentation
 comfyui_wxa8_quantizer.py
 README_quantizer.md
 README_quantizer_legacy.md

@@ -10,19 +10,13 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE_TESTS = (
-    'test_quantizer_native', 'test_kitchen_pipeline', 'test_architecture_detection',
-    'test_quant_metadata', 'test_w6a8', 'test_project_structure', 'test_linux_cli',
-    'test_release_contracts',
-    'test_added_architectures', 'test_cli_safety',
-)
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--comfy-root', type=Path, help='require this ComfyUI consumer checkout')
     parser.add_argument('--iris-root', type=Path, help='require the installed native Iris consumer')
-    parser.add_argument('--cuda', action='store_true', help='require CUDA and run native W6A8 forward checks')
+    parser.add_argument('--cuda', action='store_true', help='require CUDA and run native format/MSE regression suites')
     args = parser.parse_args(argv)
     if args.cuda and not args.comfy_root:
         parser.error('--cuda requires --comfy-root')
@@ -47,15 +41,16 @@ def main(argv=None) -> int:
             subprocess.run([sys.executable, *arguments], cwd=ROOT,
                            env=environment, check=True, timeout=600)
 
-        run('-m', 'compileall', '-q', 'native_quantizer', 'scripts')
+        run('-m', 'compileall', '-q', 'native_quantizer', 'scripts', 'tests')
         run('-m', 'native_quantizer', '--no-config', '--self-test')
-        run('-m', 'unittest', '-q', *CORE_TESTS)
+        run('-m', 'unittest', 'discover', '-s', 'tests/cpu', '-t', '.', '-q')
         if args.cuda:
             # Required integration must fail, never pass by skipping the suite.
             run('-c', "import torch; from native_quantizer.runtime.kitchen import require_w6a8_api; "
                 "assert torch.cuda.is_available(), 'CUDA is required'; require_w6a8_api()",
                 environment=env)
-            run('-m', 'unittest', '-v', 'test_w6a8_cuda', environment=env)
+            for path in sorted((ROOT / 'tests/cuda').glob('test_*.py')):
+                run('-m', 'unittest', '-v', 'tests.cuda.' + path.stem, environment=env)
     print('Release checks passed. See docs/support.md for evidence limits.')
     return 0
 

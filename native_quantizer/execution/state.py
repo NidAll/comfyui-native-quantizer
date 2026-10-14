@@ -20,6 +20,7 @@ from native_quantizer.identity import (
 from native_quantizer.planning.types import ConversionPlan
 from native_quantizer.runtime.kitchen import kitchen_version
 from native_quantizer.utils import json_dumps
+from native_quantizer.optimization import OptimizationConfig
 
 
 @dataclass
@@ -99,5 +100,9 @@ def _plan_hash(info: CheckpointInfo, plan: ConversionPlan, args: Any,
         options.update(w6a8_group_size=getattr(args, "w6a8_group_size", 16),
                        enable_w6a8=getattr(args, "enable_w6a8", False),
                        kitchen_version=kitchen_version(), w6a8_revision=FORMAT_W6A8_REVISION)
+    optimization = OptimizationConfig.from_options(args)
+    if optimization.enabled:
+        options['optimization'] = optimization.to_dict()
+        options['optimization_calibration_digest'] = getattr(args, '_optimization_calibration_digest', None)
     h.update(json_dumps(options).encode("utf-8"))
     return h.hexdigest()

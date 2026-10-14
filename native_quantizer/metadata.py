@@ -15,7 +15,6 @@ from native_quantizer.dtypes import FLOAT_DTYPES, tensor_nbytes, torch_dtype_nam
 from native_quantizer.errors import PolicyError
 from native_quantizer.formats import FORMAT_TO_KITCHEN_LAYOUT
 from native_quantizer.identity import (
-    COMFYUI_BASE,
     COMFYUI_PR,
     COMFYUI_PR_HEAD,
     COMFY_KITCHEN_REV,
@@ -46,6 +45,7 @@ from native_quantizer.planning.types import ConversionPlan, DecisionKind, Tensor
 from native_quantizer.runtime.capabilities import EnvironmentInfo
 from native_quantizer.runtime.kitchen import kitchen_version
 from native_quantizer.utils import json_dumps
+from native_quantizer.optimization import OptimizationConfig
 
 
 def layer_quant_config(d: TensorDecision) -> Dict[str, Any]:
@@ -348,6 +348,8 @@ def build_extension_metadata(info: CheckpointInfo, plan: ConversionPlan,
         "converter": CONVERTER_NAME,
         "converter_version": get_converter_version(),
         "algorithm_identity": get_algorithm_identity(),
+        "optimization": {**OptimizationConfig.from_options(args).to_dict(),
+                         'calibration_digest': getattr(args, '_optimization_calibration_digest', None)},
         "format": plan.fmt,
         "format_revision": format_revision(plan.fmt),
         "architecture": d.architecture,
@@ -397,9 +399,8 @@ def build_extension_metadata(info: CheckpointInfo, plan: ConversionPlan,
                 "merged": True,
                 "merged_commit": "344b43989e",
                 "min_version": "0.31.0",
-                "note": "ComfyUI PR #15308 (asym_w4a8_int8 loader) merged 2026-08-07; "
-                        "ComfyUI >= v0.31.0 loads W4A8 natively, older builds need "
-                        "patches/comfyui_w4a8_loader.patch (base " + COMFYUI_BASE + ")",
+                "note": "Requires native asym_w4a8_int8 registration in ComfyUI "
+                        ">= 0.31.0; upgrade the consumer if the algorithm is unavailable",
             },
             "cuda_backend": {
                 "requires": "PyTorch cu130+, SM >= 8.0",

@@ -14,7 +14,7 @@ This quantizer does not install or modify that loader.
 comfyquant iris.safetensors --no-config --inspect --json
 comfyquant iris.safetensors --no-config --format int8-convrot --dry-run
 comfyquant iris.safetensors --no-config --format int8-convrot \
-  --device cuda --target-runtime nvidia --compute-dtype fp32 \
+  --device auto --target-runtime auto --compute-dtype fp32 \
   --rotation-backend butterfly --max-memory 256M \
   --output iris-int8.safetensors --validate
 comfyquant --no-config --verify-output iris-int8.safetensors --json
@@ -41,4 +41,3 @@ loader/dispatch contracts, not full-checkpoint visual quality or throughput.
 
 Architecture sources: [official Iris implementation](https://github.com/speridlabs/iris-3b/blob/main/src/iris3b/models/dit.py)
 and [official model card](https://huggingface.co/speridlabs/iris-3b).
-The reviewed local native loader revision is recorded in the candidate validation.

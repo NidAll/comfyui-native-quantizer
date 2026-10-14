@@ -22,6 +22,7 @@ from native_quantizer.checkpoint_io.fingerprints import (
 from native_quantizer.checkpoint_io.reader import CheckpointReader
 from native_quantizer.checkpoint_io.types import CheckpointInfo
 from native_quantizer.codecs.bounded import _chunk_rows_for_budget, _quant_work_bytes, quantize_tensor_bounded
+from native_quantizer.optimization import OptimizationConfig, layer_activations, read_optimization_metadata
 from native_quantizer.codecs.packing import unpack_int4_signed, unpack_w4
 from native_quantizer.codecs.rotation import _is_power_of_four
 from native_quantizer.codecs.w6a8 import pack_w6, unpack_w6
@@ -107,6 +108,7 @@ class Validator:
             metrics: Optional[Dict[str, TensorMetrics]] = None,
             input_hashes: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         args = self.args
+        optimization = OptimizationConfig.from_options(args)
         full_validation = bool(args.validate or args.validation_only)
         out_path = self.output_path
         if not os.path.exists(out_path):
@@ -188,6 +190,9 @@ class Validator:
         if ext_ok:
             try:
                 ext_payload = json.loads(meta[METADATA_KEY_EXT])
+                stored_optimization = read_optimization_metadata(ext_payload.get('optimization'))
+                self.check('optimization-metadata', args.validation_only or stored_optimization == optimization,
+                           'serialized optimizer matches the conversion request')
                 required = ("schema", "converter", "converter_version", "format",
                             "architecture", "source", "quantization", "output")
                 source_block = ext_payload.get("source", {}) \
@@ -503,7 +508,7 @@ class Validator:
                         max_mem = getattr(args, "max_memory", 2 * 1024**3)
                         bounded = (
                             d.name in getattr(self.plan, "chunked_layers", set())
-                            or _quant_work_bytes(orig, d.format) > max_mem
+                            or _quant_work_bytes(orig, d.format, optimization) > max_mem
                         )
                         recon_bound = {
                             FORMAT_W4A8: self.plan.detection.policy.max_rel_l2,
@@ -725,13 +730,15 @@ class Validator:
                     d0.convrot_groupsize, max_mem, torch.device("cpu"),
                     compute_dtype=compute_dtype,
                     seed=getattr(args, "seed", 0),
-                    codebook_mode=getattr(args, "codebook_mode", "auto"))
+                    codebook_mode=getattr(args, "codebook_mode", "auto"), optimization=optimization,
+                    activations=layer_activations(getattr(args, '_optimization_calibration', None), d0.name))
                 out2 = quantize_tensor_bounded(
                     reader, d0.name, d0.format, d0.group_size,
                     d0.convrot_groupsize, max_mem, torch.device("cpu"),
                     compute_dtype=compute_dtype,
                     seed=getattr(args, "seed", 0),
-                    codebook_mode=getattr(args, "codebook_mode", "auto"))
+                    codebook_mode=getattr(args, "codebook_mode", "auto"), optimization=optimization,
+                    activations=layer_activations(getattr(args, '_optimization_calibration', None), d0.name))
                 det = all(torch.equal(out1[k], out2[k]) for k in out1)
                 self.check("deterministic-conversion", det, "two runs byte-identical")
                 if conv_device == "cpu" and d0.name not in getattr(self.plan, "chunked_layers", set()):

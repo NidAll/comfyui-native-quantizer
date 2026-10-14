@@ -8,7 +8,7 @@ from typing import Dict
 CONVERTER_NAME = "comfyui_native_quantizer"
 
 
-_CONVERTER_VERSION = "2.3.0rc2"
+_CONVERTER_VERSION = "2.3.0rc3"
 
 
 def get_converter_version() -> str:

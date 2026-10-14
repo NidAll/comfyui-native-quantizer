@@ -1,24 +1,22 @@
 # Release process
 
-The prepared identity is CLI/library `2.3.0rc2`. Do not reuse
-`v2.2.0`, replace an existing tag or call an unevaluated support set stable.
+## Review the source
 
-## Prepare a reviewed source snapshot
+Review tracked changes and new files as one intentional payload. Preserve
+unrelated work. Exclude model weights, generated media, local instructions,
+private reports, credentials, personal paths and machine details. Keep a
+reproducible inventory of the source used to build artifacts.
 
-Review tracked and non-ignored new files, including the modular backend and
-CLI. Keep model weights, generated media, reports with private inputs,
-machine details and local instructions out of the public payload. Preserve
-unrelated work. Use SSH for GitHub Git transport and verify the configured
-remote and authentication before any authorized push.
+For a new release, choose an unused version and update runtime/package identities
+together. Update the changelog, support matrix and validation record. Payload or
+metadata contract changes require a format-revision review; resume journals remain
+version-bound. Do not replace existing tags or published artifacts.
 
-Update runtime/package identities, changelog, migration,
-support matrix and validation record together. Existing format revisions need
-their own compatibility review when payload contracts change. Old conversion
-journals must remain version-bound.
+GitHub Git transport uses SSH. Check the remote and authentication before an
+authorized push, preserving host-key verification. Preparing files and artifacts
+does not authorize publishing them.
 
-## Run local gates
-
-Use an environment with the intended PyTorch build:
+## Run source checks
 
 ```sh
 python scripts/check.py
@@ -26,45 +24,42 @@ python scripts/check.py --comfy-root /path/to/ComfyUI --cuda
 git diff --check
 ```
 
-Default checks are CPU-only. To require the native Iris consumer, add
-`--iris-root /path/to/ComfyUI-Iris` alongside `--comfy-root`. Explicit consumer checks fail if the consumer is
-missing; CUDA checks fail if CUDA or the six-bit API is unavailable. No check
-downloads weights or starts services. Record optional skips and required failures.
+Add `--iris-root /path/to/ComfyUI-Iris` when that consumer is required. Default
+checks use CPU and synthetic fixtures. Requested consumer/CUDA checks fail when
+unavailable. Record software versions, allowed skips and actual results; no check
+should start services or download model weights. Check documentation links and
+CLI examples after changing guides.
 
-## Build and verify artifacts
+## Build and inspect distributions
 
-Use a clean snapshot/output directory and isolated build tooling:
+Use a clean output directory separate from existing release assets:
 
 ```sh
 python -m pip install 'build>=1.2' 'twine>=5'
-python -m build --outdir dist
-python -m twine check --strict dist/*.whl dist/*.tar.gz
-python scripts/check_distributions.py dist
+python -m build --outdir /path/to/release-artifacts
+python -m twine check --strict /path/to/release-artifacts/*.whl /path/to/release-artifacts/*.tar.gz
+python scripts/check_distributions.py /path/to/release-artifacts
 ```
 
-`build` creates a source archive and rebuilds its wheel from that archive.
-The CLI wheel and source archive include the full license. Both exclude Studio,
-its tests, requirements and packaging. The source archive includes CLI tests, guides and scripts. Archive checks verify identities, resources, license,
-isolation, payload hygiene and generate `SHA256SUMS`.
+The build creates a source archive and builds its wheel from that archive.
+Archive checks verify package identity, complete license, resources, payload
+privacy and frontend isolation, then generate `SHA256SUMS`. Confirm changed
+source files are present byte-for-byte. The source archive includes the tests,
+CLI guides and scripts needed to reproduce validation.
 
-Install the CLI wheel into a fresh environment, run `pip check`, and copy
-`scripts/smoke_installed.py` outside the source checkout. Run it
-before supplying PyTorch; then run `--compute` with the tested compute stack (PyTorch 2.11.0).
-The compute smoke must publish and independently verify a tiny checkpoint and
-preserve protected tensors. Also rebuild/test the source distributions rather
-than relying on an editable install alone. CI performs these gates separately
-from source tests.
+Install the wheel in a fresh environment and run `pip check`. Copy
+`scripts/smoke_installed.py` outside the checkout and run it before adding
+PyTorch. Then supply the tested compute dependencies and run it with `--compute`.
+Also exercise MSE conversion/verification from the installed package. Test the
+extracted source archive rather than relying only on an editable installation.
 
-The package metadata follows the [Python Packaging User Guide](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/).
-Archive contents are controlled using [setuptools manifests](https://setuptools.pypa.io/en/latest/userguide/miscellaneous.html).
+## Publish
 
-## Publish and promote
+After an authorized source push, require all hosted jobs to pass at the reviewed
+commit. Tag that exact commit, then publish the validated wheel, source archive,
+checksums and support limits. Use prerelease status while the support set remains
+under evaluation. A PyPI upload is a separate publishing action.
 
-After an authorized source push, require every hosted CI job to pass at the
-reviewed commit. Tag the exact candidate commit and publish a GitHub prerelease
-with the two validated distributions, checksums and their evidence limits.
-Publication and PyPI upload are separate actions; neither is automatic here.
-
-A stable release additionally needs the named model/runtime acceptance set
-described in [support.md](support.md). Keep untested combinations experimental.
-If a gate fails, fix the candidate and rerun the affected checks before promotion.
+Promote model/format/backend combinations only with the evidence defined in
+[support](support.md). Fix failed gates and rerun the affected checks before
+publishing.

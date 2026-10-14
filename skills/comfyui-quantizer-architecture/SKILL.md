@@ -25,15 +25,15 @@ Reuse existing codecs, formats, metadata, planning and runtime capabilities. An 
 
 ## Prove routing and policy behavior without large weights
 
-Extend `test_architecture_detection.py` with independent header fixtures based on inspected source, including bare/prefixed keys, partial signatures, realistic shape boundaries, variants and collisions with the nearest families. Add real block-name selection fixtures that prove intended linears are reached while sensitive tensors are kept. Include ordinary and malformed custom policy/remapping cases if those paths change.
+Extend `tests.cpu.test_architecture_detection` with independent header fixtures based on inspected source, including bare/prefixed keys, partial signatures, realistic shape boundaries, variants and collisions with the nearest families. Add real block-name selection fixtures that prove intended linears are reached while sensitive tensors are kept. Include ordinary and malformed custom policy/remapping cases if those paths change.
 
 Create a tiny synthetic checkpoint with the architecture's exact names and packing-compatible reduced dimensions. Run inspection/dry-run, conversion with `--validate`, and source-free `--verify-output`. Assert protected tensors retain their original dtype/bytes and selected metadata survives the consumer's prefix/key transforms. When a genuine native loader can be exercised using synthetic tensors, test that contract too; otherwise state the missing evidence.
 
 Required checks, using the workspace interpreter:
 
 ```sh
-python comfyui_native_quantizer.py --no-config --self-test
-python -m unittest -q test_quantizer_native.py test_kitchen_pipeline.py test_architecture_detection.py
+python -m native_quantizer --no-config --self-test
+python -m unittest -q tests.cpu.test_quantizer_native tests.cpu.test_kitchen_pipeline tests.cpu.test_architecture_detection
 ```
 
 Add metadata, W6A8, CLI or project-structure suites when their contracts change. Recheck CUDA before GPU tests in the same access context; a sandbox failure can hide the device. Use bounded fixtures and output directories outside ComfyUI core. Never claim synthetic/header proof establishes generation quality, full-model latency, peak VRAM or LoRA behavior.

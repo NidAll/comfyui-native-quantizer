@@ -41,16 +41,22 @@ W6A8_WORK_BYTES_PER_ELEMENT = 160
 MIN_CHUNK_MEMORY = 32 * 1024 * 1024
 
 
-def _quant_work_bytes(meta: TensorMeta, fmt: str = FORMAT_W4A8) -> int:
-    return math.prod(meta.shape) * (W6A8_WORK_BYTES_PER_ELEMENT if fmt == FORMAT_W6A8 else QUANT_WORK_BYTES_PER_ELEMENT)
+def _work_element_bytes(fmt, optimization=None):
+    if optimization is not None and optimization.enabled:
+        return 256
+    return W6A8_WORK_BYTES_PER_ELEMENT if fmt == FORMAT_W6A8 else QUANT_WORK_BYTES_PER_ELEMENT
 
 
-def _chunk_rows_for_budget(k: int, n: int, max_mem: int, fmt: str = FORMAT_W4A8) -> int:
+def _quant_work_bytes(meta: TensorMeta, fmt: str = FORMAT_W4A8, optimization=None) -> int:
+    return math.prod(meta.shape) * _work_element_bytes(fmt, optimization)
+
+
+def _chunk_rows_for_budget(k: int, n: int, max_mem: int, fmt: str = FORMAT_W4A8, optimization=None) -> int:
     if max_mem < MIN_CHUNK_MEMORY:
         raise PolicyError(
             f"--max-memory must be at least {human_bytes(MIN_CHUNK_MEMORY)} for "
             "bounded grouped quantization")
-    row_work = k * (W6A8_WORK_BYTES_PER_ELEMENT if fmt == FORMAT_W6A8 else QUANT_WORK_BYTES_PER_ELEMENT)
+    row_work = k * _work_element_bytes(fmt, optimization)
     if row_work > max_mem:
         raise PolicyError(
             f"--max-memory {human_bytes(max_mem)} cannot hold one {k}-element "
@@ -68,6 +74,7 @@ def _quantize_rotated_w4a8_with_codebook(weight: torch.Tensor, group_size: int,
                                          codebook: torch.Tensor,
                                          scale_dtype: torch.dtype = torch.float8_e4m3fn,
                                          als_iterations: int = W4A8_ALS_ITERS,
+                                         optimization=None, activations=None, convrot_groupsize=256,
                                          ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """W4A8 quantization of a rotated weight chunk with a PRE-FIT codebook."""
     if weight.ndim != 2:
@@ -95,6 +102,13 @@ def _quantize_rotated_w4a8_with_codebook(weight: torch.Tensor, group_size: int,
     levels = (codebook.view(1, 1, 16) * s_rel.float().unsqueeze(-1)).round_().clamp_(-127, 127)
     unsigned = assign_grid(grouped, levels, s_channel).view(n, k)
     packed = ((unsigned[:, 0::2] & 0xF) | ((unsigned[:, 1::2] & 0xF) << 4)).to(torch.int8).contiguous()
+    if optimization is not None and optimization.enabled:
+        from native_quantizer.codecs.optimization import optimize_grouped
+        rotate = lambda x: rotate_int8_convrot_weight(x, convrot_groupsize)
+        out = optimize_grouped(weight, {'': packed, '_s_rel': s_rel, '_s_channel': s_channel,
+                                       '_codebook': codebook}, FORMAT_W4A8, group_size,
+                               optimization, activations, rotate)
+        return out[''], out['_s_rel'], out['_s_channel'], codebook
     return packed, s_rel, s_channel.float().contiguous(), codebook
 
 
@@ -203,6 +217,7 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
                             compute_dtype: Optional[torch.dtype] = None,
                             seed: int = 0,
                             codebook_mode: str = "auto",
+                            optimization=None, activations=None,
                             ) -> Dict[str, torch.Tensor]:
     """Quantize one tensor with a bounded working set (chunked when needed).
 
@@ -213,7 +228,7 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
     meta = reader.info.by_name(name)
     n, k = int(meta.shape[0]), int(meta.shape[1])
     full_bytes = meta.nbytes
-    work_bytes = _quant_work_bytes(meta, fmt)
+    work_bytes = _quant_work_bytes(meta, fmt, optimization)
     if work_bytes <= max_mem:
         w = reader.read_tensor(name)
         w = w.to(device=device, dtype=(compute_dtype
@@ -222,7 +237,8 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
             try:
                 out = quantize_weight_by_format(w, fmt, group_size,
                                                 convrot_groupsize, seed=seed,
-                                                codebook_mode=codebook_mode)
+                                                codebook_mode=codebook_mode,
+                                                optimization=optimization, activations=activations)
             except PolicyError as exc:
                 if "NaN or Inf" in str(exc) or "non-finite" in str(exc):
                     raise InputError(
@@ -238,7 +254,7 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
 
     log().info("chunked quantization for %s (%s > budget %s)",
                name, human_bytes(full_bytes), human_bytes(max_mem))
-    chunk_rows = _chunk_rows_for_budget(k, n, max_mem, fmt)
+    chunk_rows = _chunk_rows_for_budget(k, n, max_mem, fmt, optimization)
     if fmt != FORMAT_W4A8:
         # rowwise formats chunk exactly: no codebook, no cross-row state
         parts: Dict[str, List[torch.Tensor]] = {
@@ -253,7 +269,7 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
             try:
                 part = quantize_weight_by_format(
                     chunk, fmt, group_size, convrot_groupsize, seed=seed,
-                    codebook_mode=codebook_mode)
+                    codebook_mode=codebook_mode, optimization=optimization, activations=activations)
             except PolicyError as exc:
                 if "NaN or Inf" in str(exc) or "non-finite" in str(exc):
                     raise InputError(
@@ -285,7 +301,8 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
         rot = rotate_int8_convrot_weight(chunk, convrot_groupsize)
         p, s_rel, s_ch, _ = _quantize_rotated_w4a8_with_codebook(
             rot, group_size, codebook.to(device=rot.device),
-            als_iterations=(3 if codebook_mode == "fit" else W4A8_ALS_ITERS))
+            als_iterations=(3 if codebook_mode == "fit" else W4A8_ALS_ITERS),
+            optimization=optimization, activations=activations, convrot_groupsize=convrot_groupsize)
         packed_parts.append(p.cpu() if device.type != "cpu" else p)
         s_rel_parts.append(s_rel.cpu() if device.type != "cpu" else s_rel)
         s_ch_parts.append(s_ch.cpu() if device.type != "cpu" else s_ch)
@@ -301,6 +318,7 @@ def _quantize_row_chunk(reader: CheckpointReader, name: str, r0: int, r1: int,
                         codebook: torch.Tensor, device: torch.device,
                         compute_dtype: Optional[torch.dtype],
                         als_iterations: int = W4A8_ALS_ITERS,
+                        optimization=None, activations=None,
                         ) -> Dict[str, torch.Tensor]:
     chunk = reader.read_tensor(name)[r0:r1]
     if compute_dtype is not None and chunk.dtype not in FP8_DTYPES:
@@ -311,7 +329,8 @@ def _quantize_row_chunk(reader: CheckpointReader, name: str, r0: int, r1: int,
     try:
         packed, s_rel, s_ch, cb = _quantize_rotated_w4a8_with_codebook(
             rotated, group_size, codebook.to(device=rotated.device),
-            als_iterations=als_iterations)
+            als_iterations=als_iterations, optimization=optimization, activations=activations,
+            convrot_groupsize=convrot_groupsize)
     except PolicyError as exc:
         if "NaN or Inf" in str(exc) or "non-finite" in str(exc):
             raise InputError(
@@ -330,10 +349,10 @@ def _quantize_row_chunk(reader: CheckpointReader, name: str, r0: int, r1: int,
 
 
 def _native_rows(reader: CheckpointReader, meta: TensorMeta, budget: int,
-                 device: Any = 'cpu'):
+                 device: Any = 'cpu', optimization=None):
     """FP32 arithmetic has an explicit conservative temporary allocation budget."""
     n, k = meta.shape
-    per_row = max(1, k * 96)
+    per_row = max(1, k * (256 if optimization is not None and optimization.enabled else 96))
     if per_row > budget:
         raise UsageError(f'{meta.name}: one row needs about {human_bytes(per_row)}; increase --max-memory')
     rows = max(1, min(n, budget // per_row))

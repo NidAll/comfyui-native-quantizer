@@ -8,11 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from tests_support import isolated_module as setUpModule
+from tests.support import isolated_module as setUpModule
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class CliTests(unittest.TestCase):

@@ -16,13 +16,12 @@ from native_quantizer import events
 from native_quantizer.architectures.detection import DetectionResult
 from native_quantizer.architectures.policies import KNOWN_GATE_DIMS
 from native_quantizer.calibration import CalibrationStats
+from native_quantizer.optimization import OptimizationConfig
 from native_quantizer.checkpoint_io.types import CheckpointInfo, TensorMeta
 from native_quantizer.dtypes import FLOAT_DTYPES, torch_dtype_name
 from native_quantizer.files import _atomic_write_json, _fsync_parent
 from native_quantizer.formats import FORMAT_TO_KITCHEN_LAYOUT, NATIVE_FORMATS
 from native_quantizer.identity import (
-    COMFYUI_PR,
-    COMFY_KITCHEN_REV,
     COMPONENT_AUTO,
     COMPONENT_DIFFUSION,
     COMPONENT_TEXT_ENCODER,
@@ -321,6 +320,9 @@ def render_text_report(report: Dict[str, Any]) -> str:
                 a(f"  {name}: " + ", ".join(parts))
     a("")
     a("-- quantization --")
+    optimizer = report.get('optimization', {})
+    if optimizer.get('mode') == 'mse':
+        a(f"  optimizer: MSE ({optimizer['objective']}; {optimizer['steps']} grid points, {optimizer['iterations']} LS iterations)")
     for row in report.get("quantization_rows", []):
         a(f"  {row}")
     a("")
@@ -363,15 +365,13 @@ def build_report(info: CheckpointInfo, plan: ConversionPlan, env: EnvironmentInf
         FORMAT_TO_KITCHEN_LAYOUT[d.format]
         for d in plan.quantized_layers() if d.format in MIXED_FORMATS})
     comp = [
-        "comfy-kitchen >= %s (PR #90, merged) with %s" % (
-            COMFY_KITCHEN_REV,
+        "comfy-kitchen >= 0.2.36 with %s" % (
             ", ".join(required_layouts) or "AsymW4A8Int8Layout"),
-        "ComfyUI >= v0.31.0 (PR #%d merged as 344b43989e; older builds need "
-        "patches/comfyui_w4a8_loader.patch)" % COMFYUI_PR,
+        "ComfyUI >= 0.31.0 with the selected native quantization algorithms",
         "CUDA: PyTorch cu130+, SM >= 8.0; ROCm: triton >= 3.7; eager works anywhere",
     ]
     if plan.fmt == FORMAT_W6A8 or any(d.format == FORMAT_W6A8 for d in plan.quantized_layers()):
-        comp[:2] = ["comfy-kitchen >= 0.2.36 with explicit six-bit API (PR #191)",
+        comp[:2] = ["comfy-kitchen >= 0.2.36 with explicit six-bit API",
                     "ComfyUI >= 0.38.0 with native w6a8_int8 registration"]
     if plan.fmt == FORMAT_MIXED:
         mp = plan.mixed_plan or {}
@@ -390,6 +390,7 @@ def build_report(info: CheckpointInfo, plan: ConversionPlan, env: EnvironmentInf
                     100 * (mp.get("max_bf16_fraction") or 0)))
     return {
         "converter": CONVERTER_NAME, "converter_version": get_converter_version(),
+        "optimization": OptimizationConfig.from_options(args).to_dict(),
         "format": plan.fmt, "format_revision": format_revision(plan.fmt),
         "architecture": result.architecture, "detection_confidence": result.confidence,
         "detected_component": result.policy.component,
@@ -423,7 +424,7 @@ def build_report(info: CheckpointInfo, plan: ConversionPlan, env: EnvironmentInf
         "calibration_summary": (
             f"source={calibration.source}, files={calibration.files}, "
             f"layers={len(calibration.layers)}, provenance={json_dumps(calibration.provenance)}"
-            if calibration else "calibration-free (reference format; per-group absmax scales)"),
+            if calibration else "calibration-free (weight reconstruction objective)"),
         "validation_checks": validation.get("checks", []),
         "compatibility_summary": "; ".join(comp),
         "input_hashes": input_hashes, "output_sha256": output_sha256,

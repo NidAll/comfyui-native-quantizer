@@ -1,5 +1,5 @@
 """Synthetic published W6A8 checkpoints through native ComfyUI CUDA loading.
-Run separately where CUDA is visible: python -m unittest -v test_w6a8_cuda.py
+Run separately where CUDA is visible: python -m unittest -v tests.cuda.test_w6a8_cuda
 Timing records contain no machine identity and cover small synthetic linears only.
 """
 import contextlib
@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch
-from tests_support import isolated_module as setUpModule, load_comfy_cpu
+from tests.support import isolated_module as setUpModule, load_comfy_cpu
 from pathlib import Path
 import torch
 from safetensors import safe_open

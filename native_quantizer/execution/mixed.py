@@ -39,6 +39,7 @@ from native_quantizer.formats import format_scale_suffixes
 from native_quantizer.identity import FORMAT_W4A8, LAYER_CONF_KEY, W4A8_ALS_ITERS
 from native_quantizer.logging import log
 from native_quantizer.metadata import inline_quant_metadata, layer_quant_config
+from native_quantizer.optimization import OptimizationConfig, layer_activations
 from native_quantizer.planning.metrics import SensitivityAnalyzer, TensorMetrics
 from native_quantizer.planning.types import ConversionPlan, DecisionKind, TensorDecision
 from native_quantizer.utils import human_bytes, json_dumps
@@ -66,9 +67,18 @@ class ConversionEngine:
         self.writer: Optional[SafetensorsStreamWriter] = None
         self.metrics: Dict[str, TensorMetrics] = {}
         self.output_hash = ""
+        self._journal_writable = False
+        self.optimization = OptimizationConfig.from_options(args)
+
+    def _activations(self, name):
+        return layer_activations(getattr(self.args, '_optimization_calibration', None), name)
 
     # -- state persistence -------------------------------------------------
     def save_state(self) -> None:
+        # A rejected identity/checksum must never replace the valid journal
+        # with a new empty one from application-level exception cleanup.
+        if not self._journal_writable:
+            return
         if self.writer is not None:
             self.writer.flush()
             if self.writer.identity is not None:
@@ -265,7 +275,9 @@ class ConversionEngine:
         self.writer.open()
         if resumed:
             self._verify_resume_entries(entries_by_name)
+            self._journal_writable = True
         else:
+            self._journal_writable = True
             self.save_state()
 
         total = len(self.plan.decisions)
@@ -294,7 +306,7 @@ class ConversionEngine:
                 meta = self.info.by_name(d.name)
                 if meta is None:
                     raise PolicyError(f"conversion plan references missing tensor {d.name!r}")
-                if _quant_work_bytes(meta, d.format) > max_mem:
+                if _quant_work_bytes(meta, d.format, self.optimization) > max_mem:
                     self.plan.chunked_layers.add(d.name)
                     self._write_quantized_chunked(
                         d, entries_by_name, max_mem, device, compute_dtype)
@@ -305,7 +317,8 @@ class ConversionEngine:
                         compute_dtype=compute_dtype,
                         seed=getattr(self.args, "seed", 0),
                         codebook_mode=getattr(
-                            self.args, "codebook_mode", "auto"))
+                            self.args, "codebook_mode", "auto"),
+                        optimization=self.optimization, activations=self._activations(d.name))
                     self._write_quantized(d, quant_tensors, entries_by_name)
                     del quant_tensors
                 conf_name = f"{d.layer}.{LAYER_CONF_KEY}"
@@ -378,7 +391,7 @@ class ConversionEngine:
             self._write_quantized_rowwise_chunked(d, entries_by_name, max_mem,
                                                   device, compute_dtype)
             return
-        chunk_rows = _chunk_rows_for_budget(k, n, max_mem, d.format)
+        chunk_rows = _chunk_rows_for_budget(k, n, max_mem, d.format, self.optimization)
         sample_size = _codebook_sample_size(n * k)
         codebook = _gather_codebook_samples(
             self.reader, d.name, k, d.group_size, d.convrot_groupsize,
@@ -400,7 +413,8 @@ class ConversionEngine:
                 d.convrot_groupsize, codebook, device, compute_dtype,
                 als_iterations=(
                     3 if getattr(self.args, "codebook_mode", "auto") == "fit"
-                    else W4A8_ALS_ITERS))
+                    else W4A8_ALS_ITERS), optimization=self.optimization,
+                activations=self._activations(d.name))
             for suffix, output_suffix in suffix_map.items():
                 name = d.layer + output_suffix
                 data = tensor_to_bytes(part[suffix])
@@ -429,7 +443,7 @@ class ConversionEngine:
         if meta is None:
             raise PolicyError(f"conversion plan references missing tensor {d.name!r}")
         n, k = int(meta.shape[0]), int(meta.shape[1])
-        chunk_rows = _chunk_rows_for_budget(k, n, max_mem, d.format)
+        chunk_rows = _chunk_rows_for_budget(k, n, max_mem, d.format, self.optimization)
         suffixes = format_scale_suffixes(d.format)
         output_suffixes = {s: ConversionEngine._SUFFIX_TO_OUTPUT[s] for s in suffixes}
         hashers = {s: hashlib.sha256() for s in suffixes}
@@ -449,7 +463,8 @@ class ConversionEngine:
                     chunk, d.format, d.group_size, d.convrot_groupsize,
                     seed=getattr(self.args, "seed", 0),
                     codebook_mode=getattr(
-                        self.args, "codebook_mode", "auto"))
+                        self.args, "codebook_mode", "auto"), optimization=self.optimization,
+                    activations=self._activations(d.name))
             except PolicyError as exc:
                 if "NaN or Inf" in str(exc) or "non-finite" in str(exc):
                     raise InputError(
