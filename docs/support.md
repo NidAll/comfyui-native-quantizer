@@ -20,6 +20,10 @@ match the intended backend and consumer. A supported file format may need a
 separately installed architecture loader. See [Iris](models/iris.md) and
 [Kandinsky 6](models/kandinsky6.md) for extension-specific contracts.
 
+[Flux 3 Klein](models/flux3-klein.md) uses the native `Flux3` loader and the
+experimental `flux3` policy. It is distinct from Flux 2 Klein; synthetic policy,
+serialization and block-loading evidence does not establish generation quality.
+
 ## Coverage
 
 | Surface | Regression evidence | Evaluation still needed |

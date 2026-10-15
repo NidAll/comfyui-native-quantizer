@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add a separate experimental native Flux 3 Klein policy with complete
+  shape-checked detection, fused/split QKV and step-distilled flow-map layouts.
+- Select image/reference/text/joint block linears while preserving boundary
+  projections, modulation, embeddings and norms; add bounded conversion and
+  native block-loading regression coverage.
+
 ## 2.3.0rc3
 
 - Add optional MSE scale/clipping and least-squares optimization across native

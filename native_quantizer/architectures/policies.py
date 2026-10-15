@@ -289,6 +289,28 @@ _register(FamilyPolicy(
 
 
 _register(FamilyPolicy(
+    family="flux3",
+    comfyui_classes=("Flux3",),
+    detect_primary=("content_mode_blocks.image.0.attn_out.weight",
+                    "single_stream_modulations.txt.lin.weight"),
+    detect_hints=("emb_in.image.weight", "emb_in.image_cond.weight",
+                  "txt_in.weight", "single_blocks.0.qkv.weight",
+                  "single_blocks.0.q_proj.weight", "ref_time_in.in_layer.weight"),
+    quantize=(
+        r"^(content_mode_blocks\.(image|image_cond)|txt_mode_blocks|single_blocks)"
+        r"\.\d+\.(qkv|q_proj|k_proj|v_proj|attn_out|mlp_in|mlp_out)\.weight$",
+    ),
+    keep=(r"(^|\.)(emb_in|txt_in|time_in|ref_time_in|early_stream_modulations|"
+          r"single_stream_modulations|final_layer|pe_embedder)\.",),
+    exclude=UNIVERSAL_EXCLUDE,
+    runtime_status="experimental",
+    notes="Native Flux 3 / Klein, including step-distilled flow-map weights. "
+          "Fused or split QKV block linears only; preserve boundary projections, "
+          "time/ref-time embeddings, modulation and norms. Not the Flux 2 Klein layout.",
+))
+
+
+_register(FamilyPolicy(
     family="chroma",
     comfyui_classes=("Chroma", "ChromaRadiance"),
     detect_primary=("distilled_guidance_layer.norms.0.weight",),

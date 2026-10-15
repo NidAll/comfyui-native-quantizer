@@ -119,6 +119,12 @@ def headers():
         'blocks.0.mlp_x.w1.weight': (512, 256), 'blocks.0.mlp_x.w3.weight': (512, 256),
         'blocks.0.mlp_x.w2.weight': (256, 512),
     }
+    cases['flux3'] = {
+        'content_mode_blocks.image.0.attn_out.weight': (256, 256),
+        'single_stream_modulations.txt.lin.weight': (768, 256),
+        'emb_in.image.weight': (256, 128),
+        'single_blocks.0.qkv.weight': (768, 256),
+    }
     cases['kandinsky6'] = {
         'visual_embeddings.in_layer.weight': (256, 33), 'audio_embeddings.in_layer.weight': (128, 64),
         'video_time_embeddings.out_layer.weight': (64, 256), 'audio_time_embeddings.out_layer.weight': (64, 256),

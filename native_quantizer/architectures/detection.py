@@ -177,6 +177,23 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
         candidates.append(("hunyuan_video", ["txt_in.individual_token_refiner.blocks.0.norm1.weight"],
                            [s for s in ("img_in.proj.weight", "final_layer.linear.weight",
                                         "double_blocks.0.img_attn.qkv.weight") if has(s)]))
+    # Flux 3 has mode-specific blocks rather than Flux/Flux 2 double blocks.
+    # Require both native boundary signatures with coherent logical dimensions;
+    # neither a lone projection nor an unrelated nested component is sufficient.
+    if has("content_mode_blocks.image.0.attn_out.weight",
+           "single_stream_modulations.txt.lin.weight"):
+        out_shape = model_shape("content_mode_blocks.image.0.attn_out.weight")
+        mod_shape = model_shape("single_stream_modulations.txt.lin.weight")
+        if (out_shape and len(out_shape) == 2 and out_shape[0] > 0
+                and out_shape[0] % 128 == 0 and out_shape[0] == out_shape[1]
+                and mod_shape == (3 * out_shape[0], out_shape[0])):
+            candidates.append(("flux3", ["content_mode_blocks.image.0.attn_out.weight",
+                                         "single_stream_modulations.txt.lin.weight"],
+                               [s for s in ("emb_in.image.weight", "txt_in.weight",
+                                            "single_blocks.0.qkv.weight",
+                                            "single_blocks.0.q_proj.weight",
+                                            "ref_time_in.in_layer.weight") if has(s)]))
+
     # 7. flux / chroma / flux2
     # Hunyuan variants also use Flux-style attention blocks. Their boundary
     # projections identify the model; a shared block norm cannot override it.
@@ -573,8 +590,8 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
     if best is None:
         # try generic signature matching against the registry for anything missed
         for fam in REGISTRY_ORDER:
-            if fam in {'iris', 'kandinsky6', 'kandinsky6_sr'}:
-                # Complete, shape-checked signatures only for new extension families.
+            if fam in {'flux3', 'iris', 'kandinsky6', 'kandinsky6_sr'}:
+                # These families require complete, shape-checked signatures.
                 continue
             if fam == 'pixeldit' and any_of('y_embedder.layer_pool.weight',
                                             'blocks.0.attn.q_norm_x.weight'):
@@ -621,6 +638,12 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
             f"architecture {fam!r} has no ComfyUI quantized-loading path; conversion "
             "would not be consumable by ComfyUI (refusing unless forced)")
     detected_classifier_info = dict(locals().get("classifier_info", {}))
+    if fam == "flux3":
+        detected_classifier_info.update(
+            hidden_size=model_shape("content_mode_blocks.image.0.attn_out.weight")[0],
+            qkv_layout="fused" if has("single_blocks.0.qkv.weight") else "split",
+            flow_map=has("ref_time_in.in_layer.weight"),
+        )
     if fam == "ming_image":
         variant = "design-layer" if has_cap_pad_token else "design"
         detected_classifier_info["variant"] = variant

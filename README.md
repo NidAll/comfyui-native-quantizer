@@ -120,6 +120,11 @@ at source precision unless explicitly enabled with `--quantize-text-embeddings`
 for supported INT8/mixed paths. Norms, modulation, input/output boundaries and
 protected auxiliary towers retain their architecture policies.
 
+Native Flux 3 Klein and its step-distilled flow-map variant use the separate
+experimental `flux3` policy, including fused or split QKV block linears. See the
+[Flux 3 Klein guide](docs/models/flux3-klein.md) for preserved tensors and evidence
+limits. Flux 2 Klein remains under `flux2`.
+
 `--max-memory` budgets temporary conversion work, excluding mmap pages, framework
 overhead and allocator caches. W4A8, W6A8 and mixed conversions support matching
 resume journals. Other formats restart atomically. NVFP4/MXFP8 require a sufficient
@@ -164,7 +169,7 @@ implementation lives in `native_quantizer/`; dependencies are declared in
 - [Installation and configuration](docs/linux-cli.md)
 - [MSE objectives and benchmarks](docs/mse-optimization.md)
 - [Mixed precision, calibration and runtime costs](docs/kitchen-pipeline.md)
-- [Iris](docs/models/iris.md), [Kandinsky 6](docs/models/kandinsky6.md),
+- [Flux 3 Klein](docs/models/flux3-klein.md), [Iris](docs/models/iris.md), [Kandinsky 6](docs/models/kandinsky6.md),
   [Ming-Image](docs/models/ming-image.md), [Qwen-Image 2.1](docs/models/qwen-image-2.1.md)
 - [Support](docs/support.md) and [validation](docs/release-validation.md)
 - [Contributing](CONTRIBUTING.md), [release process](docs/releasing.md) and [changelog](CHANGELOG.md)
