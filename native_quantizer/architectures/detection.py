@@ -128,6 +128,49 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
 
     candidates: List[Tuple[str, List[str], List[str]]] = []  # (family, evidence, hints)
 
+    for text_prefix in ("language_model.", "model.language_model."):
+        full = text_prefix + "layers.0.self_attn.q_proj.weight"
+        mlp = text_prefix + "layers.0.mlp.gate_proj.weight"
+        hybrid = text_prefix + "layers.0.linear_attn.in_proj_qkv.weight"
+        control = text_prefix + "layers.0.linear_attn.A_log"
+        if has(hybrid, control, mlp):
+            candidates.append(("text_encoder_qwen35", [hybrid, control, mlp], []))
+        elif has(full, mlp):
+            candidates.append(("text_encoder_llm", [full, mlp], []))
+
+    fibo_signature = ("perceiver.latent_queries", "layers.0.attention.qkv.weight",
+                      "final_layer.linear.weight")
+    if has(*fibo_signature):
+        queries, qkv, final = (model_shape(k) for k in fibo_signature)
+        ffn_key = ("layers.0.feed_forward.w13.weight" if has("layers.0.feed_forward.w13.weight")
+                   else "layers.0.feed_forward.w1.weight")
+        ffn = model_shape(ffn_key)
+        if (queries and qkv and final and ffn and all(len(s) == 2 for s in (queries, qkv, final, ffn))
+                and queries[0] > 0 and queries[1] > 0 and queries[1] % 128 == 0
+                and qkv == (3 * queries[1], queries[1]) and final[1] == queries[1]
+                and final[0] > 0 and ffn[0] > 0 and ffn[1] == queries[1]):
+            candidates.append(("fibo2", [*fibo_signature, ffn_key], []))
+
+    moss_signature = ("shared_block_modulation.weight", "layers.0.proj.ffn_up_gate.weight")
+    if has(*moss_signature):
+        modulation, ffn = (model_shape(k) for k in moss_signature)
+        qkv_key = "layers.0.proj.qkv.weight" if has("layers.0.proj.qkv.weight") else "layers.0.proj.q.weight"
+        qkv = model_shape(qkv_key)
+        if (modulation and ffn and qkv and all(len(s) == 2 for s in (modulation, ffn, qkv))
+                and modulation[1] > 0 and modulation[1] % 128 == 0
+                and modulation[0] == 6 * modulation[1] and ffn[1] == modulation[1]
+                and ffn[0] > 0 and ffn[0] % 2 == 0
+                and qkv == ((3 if qkv_key.endswith("qkv.weight") else 1) * modulation[1], modulation[1])):
+            candidates.append(("moss_image", [*moss_signature, qkv_key], []))
+
+    minicpm_signature = ("language_model.layers.0.linear_attn.in_proj_qkv.weight",
+                         "language_model.layers.3.self_attn.q_proj.weight",
+                         "vision_tower.encoder.layers.0.self_attn.q_proj.weight",
+                         "merger.mlp.0.linear_2.weight")
+    if has(*minicpm_signature) and all(model_shape(key) == shape for key, shape in zip(
+            minicpm_signature, ((6144, 1024), (4096, 1024), (1152, 1152), (1024, 4608)))):
+        candidates.append(("minicpm_v47", list(minicpm_signature), []))
+
     if has("vae2llm.weight"):
         candidates.append(("yue2", ["vae2llm.weight"],
                            [s for s in ("llm2vae.weight", "latent_pos_embed.pe") if has(s)]))
@@ -369,8 +412,10 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
     has_pixel_space_decoder = has("dec_net.cond_embed.weight")
     has_cap_pad_token = has("cap_pad_token")
     has_x_pad_token = has("x_pad_token")
+    ming_attention = ("layers.0.attention.to_q.weight" if has("layers.0.attention.to_q.weight")
+                      else "layers.0.attention.qkv.weight")
     if (has(*ming_embedder_keys, "cap_embedder.1.weight",
-            "layers.0.attention.to_q.weight", "layers.0.feed_forward.w1.weight")
+            ming_attention, "layers.0.feed_forward.w1.weight")
             and not has_pixel_space_decoder
             and has_cap_pad_token == has_x_pad_token
             and (has_ming_marker or ming_metadata or not has_cap_pad_token)):
@@ -380,7 +425,7 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
                             if ming_metadata else []) +
                            ming_embedder_keys +
                            ["cap_embedder.1.weight",
-                            "layers.0.attention.to_q.weight",
+                            ming_attention,
                             "layers.0.feed_forward.w1.weight"],
                            [s for s in ("context_refiner.0.attention.to_q.weight",
                                         "noise_refiner.0.attention.to_q.weight") if has(s)]))
@@ -590,7 +635,7 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
     if best is None:
         # try generic signature matching against the registry for anything missed
         for fam in REGISTRY_ORDER:
-            if fam in {'flux3', 'iris', 'kandinsky6', 'kandinsky6_sr'}:
+            if fam in {'flux3', 'iris', 'kandinsky6', 'kandinsky6_sr', 'minicpm_v47', 'fibo2', 'moss_image'}:
                 # These families require complete, shape-checked signatures.
                 continue
             if fam == 'pixeldit' and any_of('y_embedder.layer_pool.weight',

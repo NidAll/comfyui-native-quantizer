@@ -31,7 +31,7 @@ def prepare_event_stream(options, *, verification_input: str | None = None,
                      options.kernel_costs, options.runtime_certificate,
                      options.report, options.json_log,
                      getattr(options, 'config', None), options.architecture_policy,
-                     options.key_map)
+                     options.key_map, getattr(options, 'reference_recipe', None))
         if any(value and _same_path(options.events_jsonl, value) for value in protected):
             raise UsageError('--events-jsonl must not overwrite an input or output path')
         if source_files and any(_same_path(options.events_jsonl, value) for value in source_files):

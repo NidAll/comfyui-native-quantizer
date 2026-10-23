@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add native Fibo2/MOSS-Image policies and correct fused Ming attention, nested
+  Qwen encoder detection and Trellis2/Pixal3D block selection.
+- Add exact, offline Comfy-Org reference recipes with per-layer 16/64/256
+  ConvRot settings, strict layout/quality gates and a metadata-only extractor.
+
 - Add a separate experimental native Flux 3 Klein policy with complete
   shape-checked detection, fused/split QKV and step-distilled flow-map layouts.
 - Select image/reference/text/joint block linears while preserving boundary

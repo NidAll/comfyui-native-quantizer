@@ -135,7 +135,7 @@ def _validate_destination_paths(info: CheckpointInfo, args: Any) -> None:
             candidate = str(Path(source).parent / filename)
             if os.path.exists(candidate):
                 protected_sources.append(candidate)
-    for option in ('architecture_policy', 'key_map', 'calibration_source',
+    for option in ('architecture_policy', 'reference_recipe', 'key_map', 'calibration_source',
                    'kernel_costs', 'runtime_certificate'):
         candidate = getattr(args, option, None)
         if candidate and os.path.isfile(candidate):
@@ -332,6 +332,8 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         raise UsageError('--quantize-text-embeddings in mixed mode requires INT8; '
                          'remove --disable-int8')
 
+    if getattr(args, 'reference_recipe', None) and args.format != 'int8-convrot':
+        raise UsageError('--reference-recipe requires --format int8-convrot')
     if args.kernel_costs and args.format != "mixed":
         raise UsageError("--kernel-costs requires --format mixed")
     if args.format in NATIVE_FORMATS:

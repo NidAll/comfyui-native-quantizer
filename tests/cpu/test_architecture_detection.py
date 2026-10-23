@@ -82,6 +82,23 @@ SIGNATURES = {
 def headers():
     cases = {family: dict.fromkeys(names.split(), (256, 256))
              for family, names in SIGNATURES.items()}
+    cases['minicpm_v47'] = {
+        'language_model.layers.0.linear_attn.in_proj_qkv.weight': (6144, 1024),
+        'language_model.layers.3.self_attn.q_proj.weight': (4096, 1024),
+        'vision_tower.encoder.layers.0.self_attn.q_proj.weight': (1152, 1152),
+        'merger.mlp.0.linear_2.weight': (1024, 4608),
+    }
+    cases['fibo2'] = {
+        'perceiver.latent_queries': (512, 256),
+        'layers.0.attention.qkv.weight': (768, 256),
+        'layers.0.feed_forward.w13.weight': (1024, 256),
+        'final_layer.linear.weight': (128, 256),
+    }
+    cases['moss_image'] = {
+        'shared_block_modulation.weight': (1536, 256),
+        'layers.0.proj.ffn_up_gate.weight': (1024, 256),
+        'layers.0.proj.qkv.weight': (768, 256),
+    }
     lumina = {'cap_embedder.1.weight': (2304, 2560),
               'noise_refiner.0.attention.k_norm.weight': (128,),
               'layers.0.attention.qkv.weight': (64, 256)}

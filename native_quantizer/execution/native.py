@@ -18,6 +18,7 @@ from typing import Any, Dict, Tuple
 from native_quantizer import events
 from native_quantizer.architectures.detection import DetectionResult
 from native_quantizer.architectures.policies import TEXT_TOKEN_EMBEDDING
+from native_quantizer.architectures.reference import load_reference_recipe
 from native_quantizer.calibration import load_calibration
 from native_quantizer.checkpoint_io.fingerprints import _portable_hash_manifest, hash_checkpoint_files
 from native_quantizer.checkpoint_io.reader import CheckpointReader
@@ -95,6 +96,20 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                                 args.exclude, args.keep_precision, None, getattr(args, "min_numel_override", None),
                                 components=args.components,
                                 quantize_text_embeddings=args.quantize_text_embeddings)
+    reference = None
+    reference_identity = None
+    if getattr(args, 'reference_recipe', None):
+        if (args.include or args.exclude or args.keep_precision or args.quantize_text_embeddings
+                or args.full_precision_matmul
+                or args.components not in ('auto', detection.policy.component)):
+            raise UsageError('reference recipes own layer selection; omit include/exclude/keep/embedding/component overrides')
+        reference, reference_identity = load_reference_recipe(args.reference_recipe, info, detection)
+        for d in decisions:
+            d.layer = d.name[:-len('.weight')] if d.name.endswith('.weight') else None
+            if d.layer in reference['layers']:
+                d.kind, d.reason = DecisionKind.QUANTIZE, 'exact reference recipe layer'
+            else:
+                d.kind, d.reason = DecisionKind.KEEP, 'reference floating tensor; passthrough'
     kitchen = _native_kitchen(spec) if spec.kitchen_class and not args.dry_run else None
     output_dtype = {'auto': None, 'fp16': torch.float16, 'bf16': torch.bfloat16}[args.output_dtype]
     if spec.algorithm is None:
@@ -106,8 +121,9 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                                and bool(TEXT_TOKEN_EMBEDDING.search(d.name)))
             d.format = FORMAT_INT8 if token_embedding else spec.algorithm
             if spec.cli == 'int8-convrot' and not token_embedding:
-                ok = m.shape[1] > 0 and m.shape[1] % 256 == 0
-                reason = 'INT8 ConvRot requires input width divisible by 256; source precision retained'
+                group = reference['layers'][d.layer].get('convrot_groupsize', 1) if reference else 256
+                ok = m.shape[1] > 0 and m.shape[1] % group == 0
+                reason = f'INT8 ConvRot requires input width divisible by {group}; source precision retained'
             elif spec.algorithm == FORMAT_W4A4:
                 ok, reason = w4a4_weight_is_quantizable(m.shape, m.dtype)
             else:
@@ -172,11 +188,16 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                         token_embedding = (d.component == COMPONENT_TEXT_ENCODER
                                            and bool(TEXT_TOKEN_EMBEDDING.search(d.name)))
                         layer_spec = NATIVE_FORMATS['int8'] if token_embedding else spec
+                        reference_conf = reference['layers'][d.layer] if reference else None
+                        if reference_conf is not None:
+                            layer_spec = NATIVE_FORMATS['int8-convrot' if reference_conf.get('convrot') else 'int8']
                         with contextlib.ExitStack() as stack:
                             fragments: Dict[str, Any] = {}
                             fragment_meta: Dict[str, Tuple[torch.dtype, Tuple[int, ...]]] = {}
                             convrot = (_pick_w4a4_convrot_group(m.shape[1]) if layer_spec.algorithm == FORMAT_W4A4
                                        else 256 if layer_spec.cli == 'int8-convrot' else 0)
+                            if reference_conf is not None:
+                                convrot = reference_conf.get('convrot_groupsize', 0)
                             scale = None
                             finite = True
                             if spec.cli.startswith('fp8-') or spec.cli == 'nvfp4':
@@ -263,8 +284,12 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                                     conf.update(convrot=True, convrot_groupsize=convrot)
                                 if args.full_precision_matmul:
                                     conf['full_precision_matrix_mult'] = True
+                                if reference_conf is not None and 'full_precision_matrix_mult' in reference_conf:
+                                    conf['full_precision_matrix_mult'] = reference_conf['full_precision_matrix_mult']
                                 layers[d.layer] = conf
                             else:
+                                if reference is not None:
+                                    raise QualityGateError(f'{m.name}: reference layer failed quality gate; no file published')
                                 quantize = False
                                 d.kind = DecisionKind.KEEP_PRECISION
                                 log().warning('%s retained at source precision: %s', m.name, metrics[m.name]['reason'])
@@ -306,6 +331,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                           'target_runtime': args.target_runtime,
                           'architecture_policy': detection.policy.to_dict(), 'source_config': info.config,
                           'hf': getattr(args, '_hf_provenance', None),
+                          'reference_recipe': reference_identity,
                           'key_map': getattr(info, '_source_names', {}),
                           'source_hashes': _portable_hash_manifest(info.files, source_hashes),
                           'quality_gate': gate, 'metrics': metrics,

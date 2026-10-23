@@ -230,6 +230,7 @@ def add_native_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument('--interactive', action='store_true', help='guided terminal wizard')
     p.add_argument('--list-formats', action='store_true', help='show native format contracts')
     p.add_argument('--architecture-policy', help='JSON architecture policy; data only, no Python execution')
+    p.add_argument('--reference-recipe', help='Pinned Comfy-Org JSON recipe for an exact native INT8 tensor layout')
     p.add_argument('--write-architecture-template', metavar='PATH', help='write a starter JSON policy and exit')
     p.add_argument('--key-map', help='JSON {source_key: target_key}; exact, collision-checked renaming before quantization')
     p.add_argument('--hf-repo', help='download raw safetensors from owner/repository')

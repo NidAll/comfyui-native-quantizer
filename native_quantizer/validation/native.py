@@ -26,6 +26,11 @@ def verify_native_output(path: str) -> Dict[str, Any]:
             if not isinstance(layers, dict):
                 raise ValueError('layers must be an object')
             source_format = provenance.get('format')
+            reference = provenance.get('reference_recipe')
+            if reference is not None:
+                if (not isinstance(reference, dict) or not isinstance(reference.get('layers'), dict)
+                        or reference['layers'] != layers or source_format != 'int8-convrot'):
+                    errors.append('reference recipe settings disagree with output layers')
             spec = NATIVE_FORMATS.get(source_format)
             if spec is None:
                 errors.append(f'unknown native output format {source_format!r}')
@@ -50,7 +55,8 @@ def verify_native_output(path: str) -> Dict[str, Any]:
                 # an INT8 ConvRot conversion, because lookup has no input
                 # activation to rotate.
                 token_embedding = bool(TEXT_TOKEN_EMBEDDING.search(layer + '.weight'))
-                if source_format == 'int8-convrot' and not token_embedding and conf.get('convrot') is not True:
+                if (source_format == 'int8-convrot' and not token_embedding
+                        and reference is None and conf.get('convrot') is not True):
                     errors.append(f'{layer}: missing INT8 ConvRot metadata')
                 if source_format == 'int4-convrot' and conf.get('linear_dtype') != 'int4':
                     errors.append(f'{layer}: missing INT4 activation request')
@@ -71,7 +77,10 @@ def verify_native_output(path: str) -> Dict[str, Any]:
                 if tuple(shape) != expected_shape:
                     errors.append(f'{layer}: storage dimensions disagree with original dimensions')
                 if fmt == FORMAT_INT8 and ('convrot' in conf or 'convrot_groupsize' in conf):
-                    if conf.get('convrot') is not True or conf.get('convrot_groupsize') != 256 or k % 256:
+                    group = conf.get('convrot_groupsize')
+                    allowed_groups = (16, 64, 256) if reference is not None else (256,)
+                    if (conf.get('convrot') is not True or type(group) is not int
+                            or group not in allowed_groups or k % group):
                         errors.append(f'{layer}: invalid INT8 ConvRot parameters')
                 if fmt == FORMAT_W4A4:
                     group = conf.get('convrot_groupsize')

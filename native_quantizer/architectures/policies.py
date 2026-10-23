@@ -576,6 +576,36 @@ _register(FamilyPolicy(
 
 
 _register(FamilyPolicy(
+    family="moss_image", comfyui_classes=("MOSSImage",),
+    detect_primary=("shared_block_modulation.weight", "layers.0.proj.ffn_up_gate.weight"),
+    quantize=(r"^layers\.\d+\.proj\.(qkv|q|k|v|o|ffn_up_gate|ffn_down)\.weight$",),
+    keep=(r"^(text_embedder|video_embedder|time_embedding|shared_block_modulation|"
+          r"video_head_modulation|final_norm_video|final_linear_video)(\.|$)",),
+    exclude=UNIVERSAL_EXCLUDE,
+    notes="Native MOSS-Image fused/split QKV. Comfy-Org quantizes the 42 main blocks; "
+          "text refinement and boundary projections remain floating point.",
+))
+
+
+_register(FamilyPolicy(
+    family="fibo2", comfyui_classes=("Fibo2",),
+    detect_primary=("perceiver.latent_queries", "layers.0.attention.qkv.weight",
+                    "final_layer.linear.weight"),
+    quantize=(
+        r"^(layers|noise_refiner)\.\d+\.attention\.(qkv|out)\.weight$",
+        r"^(layers|noise_refiner)\.\d+\.feed_forward\.(w1|w2|w3|w13)\.weight$",
+        r"^layers\.\d+\.cross_attention\.(to_q|to_kv|to_out)\.weight$",
+        r"^perceiver\.layers\.\d+\.(cross_attention|self_attention)\.(to_q|to_kv|to_out)\.weight$",
+        r"^perceiver\.layers\.\d+\.ffn\.(w1|w2|w3|w13)\.weight$",
+    ),
+    keep=(r"(^|\.)(latent_queries|x_embedder|t_embedder|final_layer|adaLN_modulation)(\.|$)",),
+    exclude=UNIVERSAL_EXCLUDE,
+    notes="Native repacked Fibo 2 Dev/Edit Turbo, fused or split FFN. Comfy-Org "
+          "includes main blocks, noise refiners and Perceiver linears. No fusion or padding is performed.",
+))
+
+
+_register(FamilyPolicy(
     family="ming_image",
     comfyui_classes=("MingImage",),
     # Design-Layer carries a Ming marker/config and paired learned pad tokens;
@@ -586,7 +616,7 @@ _register(FamilyPolicy(
                   "layers.0.feed_forward.w1.weight"),
     quantize=(
         r"^(layers|context_refiner|noise_refiner)\.\d+\.attention\."
-        r"(to_q|to_k|to_v|to_out\.0)\.weight$",
+        r"(to_q|to_k|to_v|to_out\.0|qkv|out)\.weight$",
         r"^(layers|context_refiner|noise_refiner)\.\d+\.feed_forward\."
         r"(w1|w2|w3)\.weight$",
     ),
@@ -1083,7 +1113,7 @@ _register(FamilyPolicy(
     detect_hints=("img2shape.blocks.0.self_attn.to_qkv.weight",),
     quantize=(
         r"^(img2shape|img2shape_512|shape2txt|structure_model)\.blocks\.\d+\."
-        r"(self_attn\.(to_qkv|to_out)|cross_attn\.(to_q|to_kv|to_out)|mlp\.\d+)\.weight$",
+        r"(self_attn\.(to_qkv|to_out)|cross_attn\.(cross_attn_block\.)?(to_q|to_kv|to_out)|mlp\.(mlp\.)?\d+)\.weight$",
     ),
     keep=(r"(^|\.)(t_embedder|input_layer|output_layer|adaLN_modulation|"
           r"conditioner|vae|proj_linear)(\.|$)",),
@@ -1302,6 +1332,7 @@ _register(FamilyPolicy(
     detect_primary=("layers.0.linear_attn.A_log",),
     detect_hints=("layers.0.linear_attn.in_proj_qkv.weight",),
     quantize=TEXT_LLM_QUANTIZE, exclude=TEXT_ENCODER_EXCLUDE,
+    keep=(r"\.linear_attn\.(in_proj_a|in_proj_b)\.weight$",),
     runtime_status="experimental", component=COMPONENT_TEXT_ENCODER,
     notes="Qwen3.5 hybrid full and linear attention; visual tower stays unchanged.",
 ))

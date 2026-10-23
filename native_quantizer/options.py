@@ -72,6 +72,7 @@ class ConversionOptions:
     experimental: bool = False
     yes: bool = False
     architecture_policy: str | None = None
+    reference_recipe: str | None = None
     key_map: str | None = None
     hf_repo: str | None = None
     hf_revision: str = 'main'
@@ -106,6 +107,8 @@ def validate_conversion_options(args) -> None:
             raise UsageError(f'--{key.replace("_", "-")} must be one of {", ".join(values)}')
 
     args.format = FORMAT_ALIASES.get(args.format, args.format)
+    if getattr(args, 'reference_recipe', None) and args.format != 'int8-convrot':
+        raise UsageError('--reference-recipe requires --format int8-convrot')
     if args.format not in ('w4a8', 'w6a8', 'mixed') and args.format not in NATIVE_FORMATS:
         raise UsageError(f'unknown conversion format {args.format!r}')
     if args.resume and args.overwrite:

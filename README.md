@@ -117,13 +117,18 @@ explicit download options; `--offline` prevents model downloads.
 
 Use `--components text_encoder` for supported text towers. Token embeddings stay
 at source precision unless explicitly enabled with `--quantize-text-embeddings`
-for supported INT8/mixed paths. Norms, modulation, input/output boundaries and
+for supported INT8/mixed paths, or selected by an exact reference recipe. Norms, modulation, input/output boundaries and
 protected auxiliary towers retain their architecture policies.
 
 Native Flux 3 Klein and its step-distilled flow-map variant use the separate
 experimental `flux3` policy, including fused or split QKV block linears. See the
 [Flux 3 Klein guide](docs/models/flux3-klein.md) for preserved tensors and evidence
 limits. Flux 2 Klein remains under `flux2`.
+
+Native Fibo2 and MOSS-Image policies follow the official repacked layouts.
+Use [`--reference-recipe`](docs/models/comfy-org-recipes.md) to reproduce a pinned
+Comfy-Org artifact's exact layer selection and per-layer 16/64/256 ConvRot settings.
+The metadata-only extractor checks layouts without downloading model weights.
 
 `--max-memory` budgets temporary conversion work, excluding mmap pages, framework
 overhead and allocator caches. W4A8, W6A8 and mixed conversions support matching
