@@ -37,7 +37,7 @@ from native_quantizer.planning.types import ConversionPlan, DecisionKind, Tensor
 from native_quantizer.utils import human_bytes
 from native_quantizer.validation.contracts import w6a8_checkpoint_contract, w6a8_extension_contract
 from native_quantizer.validation.native import verify_native_output
-from native_quantizer.validation.reference import reference_decode_w6a8
+from native_quantizer.validation.reference import reference_decode_w6a8, reference_decode_int8
 
 
 def _fmt_display(fmt: Optional[str]) -> Optional[str]:
@@ -150,11 +150,13 @@ def plan_from_output(output_path: str, detection: DetectionResult,
                         f"{output_path}: invalid W4A4 shape metadata for "
                         f"{layer!r}: {e}") from e
             elif lfmt == FORMAT_INT8:
-                pass  # int8_tensorwise without ConvRot has no shape constraint
+                if conf.get('convrot') and (conf.get('convrot') is not True or convrot_groupsize not in (16, 64, 256) or k % convrot_groupsize):
+                    raise ValidationError(f'{layer}: invalid rotated INT8 shape/configuration')
         decisions.append(TensorDecision(
             source_name, DecisionKind.QUANTIZE, "reconstructed from output metadata",
             layer=layer, group_size=group_size,
-            convrot_groupsize=convrot_groupsize, format=lfmt))
+            convrot_groupsize=convrot_groupsize, format=lfmt,
+            convrot=lfmt == FORMAT_INT8 and conf.get('convrot') is True))
     quantized_names = {f"{layer}.weight" for layer in layers}
     if info is not None:
         for tensor in info.tensors:
@@ -374,6 +376,8 @@ def verify_output(output_path: str) -> Dict[str, Any]:
                     problems.append(f"weight_scale {sc} != [{n}, 1]")
                 if sc == (n,):
                     problems.append("weight_scale is [N]; runtime contract prefers [N, 1]")
+                if conf.get('convrot') and (conf.get('convrot') is not True or convrot_groupsize not in (16, 64, 256) or k % convrot_groupsize):
+                    problems.append('invalid rotated INT8 shape/configuration')
         check(f"layer:{layer}", not problems, "; ".join(problems) or
               f"{lfmt} N={n} K={k} gs={group_size} cgs={convrot_groupsize}")
 
@@ -419,8 +423,8 @@ def verify_output(output_path: str) -> Dict[str, Any]:
             else:
                 scale = by_name[f"{layer}.weight_scale"][:r0]
                 scale = scale.reshape(-1, 1)
-                out = dequantize_int8_tensorwise_weight(
-                    packed, scale, output_dtype=torch.float32)
+                out = reference_decode_int8(packed, scale,
+                    convrot_groupsize=convrot_groupsize if conf.get('convrot') else None)
             finite = bool(torch.isfinite(out).all())
             sane = bool(float(out.abs().max()) <= 1e4)
             if not (finite and sane):

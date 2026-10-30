@@ -272,6 +272,14 @@ def render_text_report(report: Dict[str, Any]) -> str:
         a("  global mean err: "
           + (f"{mixed.get('global_mean_error'):.4f}" if mixed.get("global_mean_error") is not None else "n/a"))
         a(f"  promotions     : {len(mixed.get('promotions') or [])}")
+        if mixed.get('profile') == 'adaptive':
+            a(f"  error metric   : {mixed.get('error_metric')}")
+            a(f"  reference      : {mixed.get('quality_reference')} ({mixed.get('reference_error')})")
+            a(f"  paired changes : {len(mixed.get('precision_exchanges') or [])}")
+            a(f"  encoding reuse : {mixed.get('reused_encoding_layers', 0)} payloads, "
+              f"{mixed.get('reused_codebook_layers', 0)} codebooks")
+        if mixed.get('whole_file_byte_limit') is not None:
+            a(f"  whole-file cap : {human_bytes(mixed['whole_file_byte_limit'])}")
         counts = mixed.get("counts") or {}
         params = mixed.get("layer_params") or {}
         bytes_ = mixed.get("layer_bytes") or {}
@@ -493,6 +501,9 @@ def print_console_summary(*, out_path: str, input_bytes: int, output_bytes: int,
         a(f"  gates       : layer<={mixed_plan.get('layer_gate')}  "
           f"global_mean<={mixed_plan.get('global_gate')}"
           + (f"  (mean {mean:.4f})" if mean is not None else ""))
+        if mixed_plan.get('profile') == 'adaptive':
+            a(f"  metric      : held-out layer p95; reference={mixed_plan.get('quality_reference')}; "
+              f"{len(mixed_plan.get('precision_exchanges') or [])} paired changes")
         if mixed_plan.get("effective_bpp") is not None:
             a(f"  compression : {mixed_plan['effective_bpp']:.3f} bytes/param "
               f"(target {mixed_plan.get('compression_target_bpp')}); "

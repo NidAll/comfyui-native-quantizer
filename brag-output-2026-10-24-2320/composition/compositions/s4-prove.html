@@ -1,0 +1,191 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      background: #0b1218;
+      font-family: var(--font-mono, "JetBrains Mono");
+      overflow: hidden;
+    }
+    #s4-stage {
+      position: absolute;
+      inset: 0;
+    }
+    .s4-mark {
+      position: absolute;
+      left: 120px;
+      top: 96px;
+      font-size: 17px;
+      letter-spacing: 0.34em;
+      text-transform: uppercase;
+      color: #7d95a0;
+    }
+    .s4-index {
+      position: absolute;
+      right: 120px;
+      top: 96px;
+      font-size: 17px;
+      letter-spacing: 0.24em;
+      color: #55707c;
+    }
+    .s4-lab {
+      position: absolute;
+      left: 122px;
+      font-size: 28px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: #7d95a0;
+    }
+    .s4-num {
+      position: absolute;
+      left: 114px;
+      font-family: var(--font-display, "Oswald");
+      font-weight: 700;
+      font-size: 168px;
+      line-height: 1;
+      letter-spacing: -0.015em;
+      white-space: nowrap;
+    }
+    #s4-in {
+      top: 208px;
+      color: #e9f6f8;
+    }
+    #s4-out {
+      top: 500px;
+      color: #8be9e8;
+    }
+    .s4-bar {
+      position: absolute;
+      left: 120px;
+      height: 12px;
+      transform-origin: left center;
+    }
+    #s4-bar-in {
+      top: 400px;
+      width: 880px;
+      background: #2f4956;
+    }
+    #s4-bar-out {
+      top: 692px;
+      width: 556px;
+      background: #8be9e8;
+    }
+    #s4-lab-in {
+      top: 168px;
+    }
+    #s4-lab-out {
+      top: 460px;
+    }
+    #s4-delta {
+      position: absolute;
+      left: 754px;
+      top: 496px;
+      font-family: var(--font-display, "Oswald");
+      font-weight: 500;
+      font-size: 52px;
+      letter-spacing: 0.02em;
+      color: #ffd179;
+      opacity: 0;
+    }
+    #s4-file {
+      position: absolute;
+      left: 120px;
+      top: 760px;
+      font-size: 18px;
+      letter-spacing: 0.06em;
+      color: #7d95a0;
+      opacity: 0;
+    }
+    #s4-file b {
+      color: #b9ccd4;
+      font-weight: 500;
+    }
+    #s4-right-label {
+      position: absolute;
+      left: 1080px;
+      top: 160px;
+      font-size: 28px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #7d95a0;
+      opacity: 0;
+    }
+    .s4-spec {
+      position: absolute;
+      left: 1080px;
+      width: 720px;
+      border-top: 1px solid #22343d;
+      padding-top: 16px;
+      opacity: 0;
+    }
+    .s4-spec .v {
+      display: block;
+      font-family: var(--font-display, "Oswald");
+      font-weight: 500;
+      font-size: 46px;
+      letter-spacing: 0.01em;
+      text-transform: uppercase;
+      color: #e9f6f8;
+    }
+    .s4-spec .k {
+      display: block;
+      margin-top: 8px;
+      font-size: 28px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #7d95a0;
+    }
+    #s4-s0 { top: 208px; }
+    #s4-s1 { top: 338px; }
+    #s4-s2 { top: 468px; }
+    #s4-s3 { top: 598px; }
+  </style>
+  <div data-hf-id="hf-cbcv" id="root" data-composition-id="s4-prove" data-width="1920" data-height="1080">
+    <div data-hf-id="hf-o944" id="s4-stage" class="clip" data-start="0" data-duration="4.36" data-track-index="1">
+      <div data-hf-id="hf-179l" class="s4-mark" data-layout-ignore>quantizer // cli</div>
+      <div data-hf-id="hf-py83" class="s4-index" data-layout-ignore>04 / 07</div>
+
+      <div data-hf-id="hf-rlid" class="s4-lab" id="s4-lab-in">in</div>
+      <div data-hf-id="hf-2f20" class="s4-num" id="s4-in">1.11 GiB</div>
+      <div data-hf-id="hf-k4xe" class="s4-bar" id="s4-bar-in"></div>
+
+      <div data-hf-id="hf-iayn" class="s4-lab" id="s4-lab-out">out</div>
+      <div data-hf-id="hf-eyla" class="s4-num" id="s4-out">718 MiB</div>
+      <div data-hf-id="hf-gnct" class="s4-bar" id="s4-bar-out"></div>
+      <div data-hf-id="hf-exly" id="s4-delta">&minus;37%</div>
+
+      <div data-hf-id="hf-mdid" id="s4-right-label">one real run</div>
+      <div data-hf-id="hf-lcno" class="s4-spec" id="s4-s0"><span data-hf-id="hf-3sxz" class="v">196</span><span data-hf-id="hf-nx1n" class="k">layers quantized</span></div>
+      <div data-hf-id="hf-m4bh" class="s4-spec" id="s4-s1"><span data-hf-id="hf-ggfe" class="v">1.07%</span><span data-hf-id="hf-zvm1" class="k">worst relative l2</span></div>
+      <div data-hf-id="hf-q2fi" class="s4-spec" id="s4-s2"><span data-hf-id="hf-yyyg" class="v">source preserved</span><span data-hf-id="hf-d7se" class="k">overwrite is opt-in</span></div>
+      <div data-hf-id="hf-u0jj" class="s4-spec" id="s4-s3"><span data-hf-id="hf-c5r3" class="v">atomic publish</span><span data-hf-id="hf-axmk" class="k">nothing half-written</span></div>
+    </div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#s4-lab-in", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 0.06);
+    tl.fromTo(
+      "#s4-in",
+      { opacity: 0, y: 20, filter: "blur(12px)" },
+      { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.36, ease: "power4.out" },
+      0.5, // beat 14.735
+    );
+    tl.fromTo("#s4-bar-in", { scaleX: 0 }, { scaleX: 1, duration: 0.5, ease: "power2.out" }, 0.68);
+    tl.fromTo("#s4-right-label", { opacity: 0 }, { opacity: 1, duration: 0.24 }, 0.55);
+    tl.fromTo("#s4-s0", { opacity: 0, x: 12 }, { opacity: 1, x: 0, duration: 0.26, ease: "power3.out" }, 0.8);
+    tl.fromTo("#s4-s1", { opacity: 0, x: 12 }, { opacity: 1, x: 0, duration: 0.26, ease: "power3.out" }, 1.15);
+    tl.fromTo("#s4-s2", { opacity: 0, x: 12 }, { opacity: 1, x: 0, duration: 0.26, ease: "power3.out" }, 1.5);
+    tl.fromTo("#s4-s3", { opacity: 0, x: 12 }, { opacity: 1, x: 0, duration: 0.26, ease: "power3.out" }, 1.85);
+
+    tl.fromTo("#s4-lab-out", { opacity: 0 }, { opacity: 1, duration: 0.18 }, 3.0);
+    tl.fromTo(
+      "#s4-out",
+      { opacity: 0, y: 18, filter: "blur(14px)" },
+      { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.3, ease: "power4.out" },
+      3.27,
+    );
+    tl.fromTo("#s4-delta", { opacity: 0, x: -8 }, { opacity: 1, x: 0, duration: 0.24, ease: "power3.out" }, 3.42);
+    tl.fromTo("#s4-bar-out", { scaleX: 0 }, { scaleX: 1, duration: 0.45, ease: "power2.out" }, 3.27);
+    window.__timelines["s4-prove"] = tl;
+  </script>
+</template>

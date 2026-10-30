@@ -17,7 +17,7 @@ def quantized_format_bytes(n: int, k: int, fmt: str, group_size: int = 16) -> in
         return n * (k // 2) + n * (k // 16) + n * 4 + 16 * 4
     if fmt == FORMAT_W4A4:
         return n * (k // 2) + n * 4
-    if fmt == FORMAT_INT8:
+    if fmt in (FORMAT_INT8, 'int8-convrot'):
         return n * k + n * 4
     raise PolicyError(f"unknown format {fmt!r}")
 
@@ -28,7 +28,7 @@ def format_scale_suffixes(fmt: str) -> Tuple[str, ...]:
         return ("", "_s_rel", "_s_channel")
     if fmt == FORMAT_W4A8:
         return ("", "_s_rel", "_s_channel", "_codebook")
-    if fmt in (FORMAT_W4A4, FORMAT_INT8):
+    if fmt in (FORMAT_W4A4, FORMAT_INT8, 'int8-convrot'):
         return ("", "_scale")
     raise PolicyError(f"unknown format {fmt!r}")
 

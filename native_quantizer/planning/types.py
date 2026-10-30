@@ -30,6 +30,11 @@ class TensorDecision:
     out_dtype: Optional[torch.dtype] = None   # passthrough cast target (if any)
     quantized: bool = False        # True once actually quantized
     component: str = "other"      # diffusion | text_encoder | other
+    convrot: bool = False          # native INT8 rotation variant
+
+    @property
+    def encoding_format(self):
+        return 'int8-convrot' if self.convrot else self.format
 
 
 @dataclass
@@ -48,6 +53,8 @@ class ConversionPlan:
     chunked_layers: set = field(default_factory=set)   # layers quantized via the
                                                        # bounded-memory chunked path
     mixed_plan: Optional[Dict[str, Any]] = None        # mixed-planner summary
+    encoded_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
+    codebooks: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def quantized_layers(self) -> List[TensorDecision]:
         return [d for d in self.decisions if d.kind == DecisionKind.QUANTIZE]

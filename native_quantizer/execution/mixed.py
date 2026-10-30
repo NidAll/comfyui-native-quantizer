@@ -306,19 +306,24 @@ class ConversionEngine:
                 meta = self.info.by_name(d.name)
                 if meta is None:
                     raise PolicyError(f"conversion plan references missing tensor {d.name!r}")
-                if _quant_work_bytes(meta, d.format, self.optimization) > max_mem:
+                if d.name in self.plan.encoded_cache:
+                    quant_tensors = self.plan.encoded_cache.pop(d.name)
+                    self._write_quantized(d, quant_tensors, entries_by_name)
+                    del quant_tensors
+                elif _quant_work_bytes(meta, d.format, self.optimization) > max_mem:
                     self.plan.chunked_layers.add(d.name)
                     self._write_quantized_chunked(
                         d, entries_by_name, max_mem, device, compute_dtype)
                 else:
                     quant_tensors = quantize_tensor_bounded(
-                        self.reader, d.name, d.format, d.group_size,
+                        self.reader, d.name, d.encoding_format, d.group_size,
                         d.convrot_groupsize, max_mem, device,
                         compute_dtype=compute_dtype,
                         seed=getattr(self.args, "seed", 0),
                         codebook_mode=getattr(
                             self.args, "codebook_mode", "auto"),
-                        optimization=self.optimization, activations=self._activations(d.name))
+                        optimization=self.optimization, activations=self._activations(d.name),
+                        codebook=self.plan.codebooks.get(d.name))
                     self._write_quantized(d, quant_tensors, entries_by_name)
                     del quant_tensors
                 conf_name = f"{d.layer}.{LAYER_CONF_KEY}"
@@ -393,7 +398,8 @@ class ConversionEngine:
             return
         chunk_rows = _chunk_rows_for_budget(k, n, max_mem, d.format, self.optimization)
         sample_size = _codebook_sample_size(n * k)
-        codebook = _gather_codebook_samples(
+        codebook = self.plan.codebooks.get(d.name)
+        codebook = codebook if codebook is not None else _gather_codebook_samples(
             self.reader, d.name, k, d.group_size, d.convrot_groupsize,
             sample_size, chunk_rows, compute_dtype=compute_dtype,
             seed=getattr(self.args, "seed", 0),
@@ -460,7 +466,7 @@ class ConversionEngine:
                 chunk = chunk.to(device)
             try:
                 part = quantize_weight_by_format(
-                    chunk, d.format, d.group_size, d.convrot_groupsize,
+                    chunk, d.encoding_format, d.group_size, d.convrot_groupsize,
                     seed=getattr(self.args, "seed", 0),
                     codebook_mode=getattr(
                         self.args, "codebook_mode", "auto"), optimization=self.optimization,

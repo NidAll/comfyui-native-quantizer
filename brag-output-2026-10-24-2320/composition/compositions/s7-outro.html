@@ -1,0 +1,117 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      background: #070b10;
+      font-family: var(--font-mono, "JetBrains Mono");
+      overflow: hidden;
+    }
+    #s7-glow {
+      position: absolute;
+      inset: -30%;
+      background: radial-gradient(30% 34% at 50% 52%, rgba(139, 233, 232, 0.14), rgba(7, 11, 16, 0) 68%);
+      opacity: 0;
+    }
+    #s7-stage {
+      position: absolute;
+      inset: 0;
+    }
+    #s7-rule {
+      position: absolute;
+      left: 660px;
+      top: 300px;
+      width: 600px;
+      height: 1px;
+      background: #2b4b57;
+      transform-origin: center center;
+    }
+    #s7-kicker {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 322px;
+      text-align: center;
+      font-size: 28px;
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: #9fb4bd;
+    }
+    #s7-name {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 386px;
+      text-align: center;
+      font-family: var(--font-display, "Oswald");
+      font-weight: 700;
+      font-size: 196px;
+      line-height: 1;
+      letter-spacing: 0.005em;
+      text-transform: uppercase;
+      color: #e9f6f8;
+    }
+    #s7-sub {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 640px;
+      text-align: center;
+      font-size: 30px;
+      letter-spacing: 0.06em;
+      color: #8be9e8;
+    }
+    #s7-stats {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 764px;
+      text-align: center;
+      font-size: 28px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #d9e7ec;
+    }
+    #s7-stats .sep {
+      color: #7d95a0;
+      margin: 0 26px;
+    }
+    #s7-fade {
+      position: absolute;
+      inset: 0;
+      background: #000000;
+      opacity: 0;
+    }
+  </style>
+  <div data-hf-id="hf-ps4f" id="root" data-composition-id="s7-outro" data-width="1920" data-height="1080">
+    <div data-hf-id="hf-clzo" id="s7-glow" data-layout-allow-overflow></div>
+    <div data-hf-id="hf-7otj" id="s7-stage" class="clip" data-start="0" data-duration="3.8" data-track-index="1">
+      <div data-hf-id="hf-mx4e" id="s7-rule"></div>
+      <div data-hf-id="hf-uepr" id="s7-kicker">comfyui // native quantization</div>
+      <div data-hf-id="hf-5782" id="s7-name">comfyquant</div>
+      <div data-hf-id="hf-l9mj" id="s7-sub">comfyui-native-quantizer 2.3.0rc3</div>
+      <div data-hf-id="hf-kl2d" id="s7-stats">
+        <span data-hf-id="hf-1sbc" id="s7-stat-a">57/57 self-tests</span><span data-hf-id="hf-cuk5" class="sep" id="s7-sep">/</span><span data-hf-id="hf-8zy8" id="s7-stat-b">108 model classes</span>
+      </div>
+      <div data-hf-id="hf-v41i" id="s7-fade"></div>
+    </div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#s7-glow", { opacity: 0 }, { opacity: 1, duration: 1.1, ease: "power2.out" }, 0.1);
+    tl.fromTo("#s7-rule", { scaleX: 0 }, { scaleX: 1, duration: 0.4, ease: "power3.out" }, 0.12);
+    tl.fromTo("#s7-kicker", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" }, 0.3);
+    tl.fromTo(
+      "#s7-name",
+      { opacity: 0, scale: 0.97, filter: "blur(16px)" },
+      { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.52, ease: "power4.out" },
+      0.535, // beat 26.735
+    );
+    tl.fromTo("#s7-sub", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.32, ease: "power2.out" }, 1.085); // beat 27.285
+    tl.fromTo("#s7-stat-a", { opacity: 0 }, { opacity: 1, duration: 0.26 }, 1.625); // beat 27.825
+    tl.fromTo("#s7-sep", { opacity: 0 }, { opacity: 1, duration: 0.26 }, 1.625);
+    tl.fromTo("#s7-stat-b", { opacity: 0 }, { opacity: 1, duration: 0.26 }, 2.175); // beat 28.375
+    tl.fromTo("#s7-fade", { opacity: 0 }, { opacity: 1, duration: 0.62, ease: "power2.in" }, 3.12);
+    window.__timelines["s7-outro"] = tl;
+  </script>
+</template>

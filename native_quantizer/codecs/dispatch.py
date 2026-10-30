@@ -24,6 +24,10 @@ def quantize_weight_by_format(weight: torch.Tensor, fmt: str, group_size: int,
     """Quantize with the W4A8 layout; returns the per-layer output tensors
     keyed by suffix ('' for the packed weight, '_s_rel', '_s_channel',
     '_codebook', optional '_correction')."""
+    if fmt == 'int8-convrot':
+        rotate = lambda x: rotate_int8_convrot_weight(x, convrot_groupsize)
+        q, scale = quantize_int8_tensorwise_weight(rotate(weight), optimization, activations, rotate)
+        return {'': q, '_scale': scale}
     if fmt == FORMAT_W6A8:
         if weight.ndim != 2 or weight.shape[0] <= 0:
             raise PolicyError("W6A8 requires a nonempty 2D weight")
@@ -68,6 +72,9 @@ def quantize_weight_by_format(weight: torch.Tensor, fmt: str, group_size: int,
 def dequantize_weight_by_format(tensors: Dict[str, torch.Tensor], fmt: str,
                                 group_size: int, convrot_groupsize: int,
                                 output_dtype: torch.dtype) -> torch.Tensor:
+    if fmt == 'int8-convrot':
+        rotated = dequantize_int8_tensorwise_weight(tensors[''], tensors['_scale'], torch.float32)
+        return rotate_int8_convrot_weight(rotated, convrot_groupsize).to(output_dtype)
     if fmt == FORMAT_W6A8:
         validate_w6_tensors(tensors, group_size, convrot_groupsize)
         return dequantize_w6a8_weight(tensors[""], tensors["_s_rel"], tensors["_s_channel"],

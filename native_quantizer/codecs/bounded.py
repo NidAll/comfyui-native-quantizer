@@ -217,7 +217,7 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
                             compute_dtype: Optional[torch.dtype] = None,
                             seed: int = 0,
                             codebook_mode: str = "auto",
-                            optimization=None, activations=None,
+                            optimization=None, activations=None, codebook=None,
                             ) -> Dict[str, torch.Tensor]:
     """Quantize one tensor with a bounded working set (chunked when needed).
 
@@ -235,7 +235,16 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
                  if compute_dtype is not None and w.dtype not in FP8_DTYPES else w.dtype))
         try:
             try:
-                out = quantize_weight_by_format(w, fmt, group_size,
+                if fmt == FORMAT_W4A8 and codebook is not None:
+                    rotated = rotate_int8_convrot_weight(w, convrot_groupsize)
+                    packed, relative, channel, table = _quantize_rotated_w4a8_with_codebook(
+                        rotated, group_size, codebook.to(device),
+                        als_iterations=3 if codebook_mode == 'fit' else W4A8_ALS_ITERS,
+                        optimization=optimization, activations=activations,
+                        convrot_groupsize=convrot_groupsize)
+                    out = {'': packed, '_s_rel': relative, '_s_channel': channel, '_codebook': table}
+                else:
+                    out = quantize_weight_by_format(w, fmt, group_size,
                                                 convrot_groupsize, seed=seed,
                                                 codebook_mode=codebook_mode,
                                                 optimization=optimization, activations=activations)
@@ -283,7 +292,7 @@ def quantize_tensor_bounded(reader: CheckpointReader, name: str, fmt: str,
             del chunk, part
         return {s: torch.cat(v, dim=0).contiguous() for s, v in parts.items()}
     sample_size = _codebook_sample_size(n * k)
-    codebook = _gather_codebook_samples(reader, name, k, group_size,
+    codebook = codebook if codebook is not None else _gather_codebook_samples(reader, name, k, group_size,
                                         convrot_groupsize, sample_size, chunk_rows,
                                         device="cpu", compute_dtype=compute_dtype,
                                         seed=seed, codebook_mode=codebook_mode)

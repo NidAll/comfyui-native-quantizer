@@ -60,6 +60,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "Gaussian table and fits only heavy-tailed layers; "
                         "fixed never fits; fit uses per-layer Lloyd-Max fitting")
     p.add_argument("--enable-w6a8", action="store_true", help="mixed mode: opt in to native W6A8 candidates")
+    p.add_argument('--enable-int8-convrot', action='store_true',
+                   help='mixed mode: also evaluate rotated INT8; enabled by adaptive profile')
     p.add_argument('--optimizer', choices=('none', 'mse'), default='none',
                    help='optional native scale/clipping optimization; none preserves existing encoders')
     p.add_argument('--mse-objective', choices=('auto', 'weight', 'activation'), default='auto',
@@ -73,11 +75,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="mixed-mode profile: auto detects the runtime (GPU -> "
                         "balanced, CPU -> conservative); balanced, conservative "
                         "and size-first set the quality/compression tradeoff; "
-                        "throughput permits more direct INT8 storage")
+                        "throughput permits more direct INT8 storage; adaptive "
+                        "uses held-out calibration and measured precision exchanges")
     p.add_argument("--kernel-costs", metavar="JSON",
                    help="mixed mode: shape-specific measurements from benchmark_kitchen.py")
     p.add_argument("--mixed-objective", choices=("kitchen", "size"), default="kitchen",
                    help="spend available byte budget to avoid Kitchen runtime weight expansion, or minimize storage")
+    p.add_argument('--quality-reference', choices=('none', 'w6a8', 'int8'), default='none',
+                   help='adaptive: cap held-out aggregate error at the measured W6A8 or INT8 reference')
     p.add_argument("--target-runtime", choices=["auto", "nvidia", "amd", "cpu"],
                    default="auto",
                    help="target inference runtime used for format eligibility; "
@@ -106,6 +111,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="mixed mode: hard compression target in bytes/parameter "
                         "for the targeted linear payload (overrides the profile; "
                         "conversion fails when exceeded)")
+    p.add_argument('--target-compression', type=float, default=None, metavar='RATIO',
+                   help='mixed mode: hard whole-file compression ratio, including protected tensors and metadata')
     p.add_argument("--max-bf16-fraction", "--max-original-byte-fraction",
                    type=float, default=None, dest="max_bf16_fraction",
                    metavar="F",
@@ -163,6 +170,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    metavar="PATTERN", help="regex; never quantize matching tensors")
     p.add_argument("--keep-precision", action="append", default=[],
                    metavar="PATTERN", help="regex; keep matching weights at original precision")
+    p.add_argument("--int8-convrot-groupsize", type=int, choices=(16, 64, 256), default=None,
+                   help="INT8 ConvRot rotation group size (default: 256)")
     p.add_argument("--sensitivity-threshold", type=float, default=None,
                    help="keep layers at original precision when their (activation-aware "
                         "if calibration given, else weight-only) error exceeds this")

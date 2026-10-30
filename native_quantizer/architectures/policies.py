@@ -1327,6 +1327,46 @@ _register(FamilyPolicy(
 
 
 _register(FamilyPolicy(
+    family="lfm3_vl_2b",
+    comfyui_classes=("PromptStylerLfm3Vl",),
+    detect_primary=("language_model.embed_tokens.weight",
+                    "language_model.layers.0.conv.in_proj.weight",
+                    "vision_tower.patchifier.weight",
+                    "multi_modal_projector.linear_2.weight"),
+    quantize=(r"^(?:model\.)?language_model\.layers\.\d+\.feed_forward\.(w1|w2|w3)\.weight$",
+              r"^(?:model\.)?language_model\.layers\.\d+\.conv\.(in_proj|out_proj)\.weight$",
+              r"^(?:model\.)?language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.weight$"),
+    keep=(r"^(?:model\.)?(vision_tower|multi_modal_projector|language_model\.embed_tokens)(\.|$)",
+          r"^lm_head(\.|$)", r"\.self_attn\.gate_proj(\.|$)"),
+    exclude=TEXT_ENCODER_EXCLUDE,
+    runtime_status="experimental", component=COMPONENT_TEXT_ENCODER,
+    notes="LFM3-VL-2B hybrid language linears; vision, projector, embeddings, "
+          "head, attention gates, convolution kernels and norms remain at source precision. "
+          "Requires the package-local native operations consumer.",
+))
+
+
+_register(FamilyPolicy(
+    family="minicpm_v47",
+    comfyui_classes=("AnimaPromptArchitectMiniCPM",),
+    detect_primary=("language_model.layers.0.linear_attn.in_proj_qkv.weight",
+                    "vision_tower.encoder.layers.0.self_attn.q_proj.weight",
+                    "merger.mlp.0.linear_2.weight"),
+    quantize=(r"(^|\.)language_model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight$",
+              r"(^|\.)language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.weight$",
+              r"(^|\.)language_model\.layers\.\d+\.linear_attn\.(in_proj_qkv|in_proj_z|out_proj)\.weight$"),
+    keep=(r"(^|\.)language_model\.layers\.(0|23)\.",
+          r"(^|\.)(vision_tower|merger|lm_head|embed_tokens)(\.|$)",
+          r"\.linear_attn\.(A_log|dt_bias|conv1d|norm|in_proj_a|in_proj_b)(\.|$)"),
+    exclude=TEXT_ENCODER_EXCLUDE,
+    runtime_status="experimental", component=COMPONENT_TEXT_ENCODER,
+    notes="MiniCPM-V 4.7 1B Qwen3.5 hybrid. Package-local Anima Prompt Architect consumer; "
+          "BF16 vision/merger, embeddings/head, boundary blocks and recurrent controls. "
+          "Recipe: INT8 ConvRot, BF16 retained tensors, optional weight-MSE scales.",
+))
+
+
+_register(FamilyPolicy(
     family="text_encoder_qwen35",
     comfyui_classes=("Qwen35TEModel",),
     detect_primary=("layers.0.linear_attn.A_log",),

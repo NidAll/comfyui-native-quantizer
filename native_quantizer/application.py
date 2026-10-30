@@ -22,7 +22,7 @@ from native_quantizer.architectures.detection import (
     unet_prefix_from_keys,
 )
 from native_quantizer.architectures.policies import get_family
-from native_quantizer.calibration import apply_nonfinite_policy, load_calibration
+from native_quantizer.calibration import apply_nonfinite_policy, load_calibration, split_calibration
 from native_quantizer.checkpoint_io.fingerprints import hash_checkpoint_files
 from native_quantizer.checkpoint_io.reader import CheckpointReader, RawSafetensorsFile, discover_checkpoint
 from native_quantizer.checkpoint_io.types import CheckpointInfo
@@ -244,6 +244,8 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     info = discover_checkpoint(args.model, trust_pickle=args.trust_pickle,
                                allow_extra_shard_tensors=
                                args.allow_extra_shard_tensors)
+    args._max_output_bytes = (int(sum(os.path.getsize(path) for path in info.files) / args.target_compression)
+                              if getattr(args, 'target_compression', None) else None)
     events.emit("source", files=len(info.files), tensors=len(info.tensors),
                        bytes=info.total_bytes, quantized=info.is_quantized_input)
     apply_key_mapping(info, args.key_map)
@@ -605,20 +607,38 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             codebook_mode=args.codebook_mode,
             objective=args.mixed_objective, kernel_costs=costs,
             enable_w6a8=args.enable_w6a8, w6a8_group_size=args.w6a8_group_size,
-            optimization=optimization)
+            optimization=optimization, workloads=workloads,
+            target_bytes=(args._max_output_bytes - 16384 - sum(len(t.name.encode()) * 4 + 512 for t in info.tensors)
+                          - len(json_dumps(info.metadata).encode()) if args._max_output_bytes is not None else None),
+            enable_int8_convrot=getattr(args, 'enable_int8_convrot', False),
+            quality_reference=getattr(args, 'quality_reference', 'none'))
         if args.require_runtime_certificate and certificate is None:
             raise RuntimeCompatibilityError(
                 "--require-runtime-certificate needs --runtime-certificate "
                 "(supply a certificate from real native execution on the "
                 "target inference machine)")
-        if args.require_calibration:
+        if args.require_calibration or profile_name == 'adaptive':
             missing = [d.name for d in decisions if d.kind == DecisionKind.QUANTIZE
                        and mixed_planner._activations(d.name) is None]
             if missing:
                 raise CalibrationError(
                     f"calibration missing for {len(missing)} targeted layers: " + ", ".join(missing[:5]))
+        if profile_name == 'adaptive':
+            if not any(len(key) == 7 for key in costs):
+                raise UsageError('adaptive planning requires workload-aware kitchen-costs/v3 measurements')
+            train_calibration, holdout_calibration = split_calibration(calibration)
+            mixed_planner.calibration = holdout_calibration
+            mixed_planner.optimization_calibration = train_calibration
+            args._optimization_calibration = train_calibration
+            if optimization.enabled:
+                args._optimization_calibration_digest = calibration_digest(train_calibration)
+        mixed_source_hashes = hash_checkpoint_files(info, refresh=True)
         mixed_plan = mixed_planner.plan(info, decisions)
+        if hash_checkpoint_files(info, refresh=True) != mixed_source_hashes:
+            raise InputError('source changed during mixed planning; refusing cached encodings and plan')
         mixed_plan["measured_workloads"] = workloads
+        mixed_plan['calibration_digest'] = calibration_digest(calibration)
+        mixed_plan['whole_file_byte_limit'] = args._max_output_bytes
         if args.kernel_costs:
             mixed_plan["kernel_costs_sha256"] = sha256_file(args.kernel_costs)
         args._runtime_gpu_name = runtime_caps.gpu_name
@@ -676,6 +696,12 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     plan.device = effective_backend
     if mixed_planner is not None:
         plan.mixed_plan = mixed_planner.summary
+        plan.encoded_cache = mixed_planner.selected_encodings()
+        plan.mixed_plan['reused_encoding_layers'] = len(plan.encoded_cache)
+        plan.codebooks = {d.name: mixed_planner.codebooks[d.name] for d in plan.quantized_layers()
+                          if d.format == FORMAT_W4A8 and d.name in mixed_planner.codebooks}
+        plan.mixed_plan['reused_codebook_layers'] = len(plan.codebooks)
+        mixed_planner.encoded_cache.clear()
     entries, total_out = build_output_entries(info, decisions, fmt, out_dtype)
     plan.output_entries = entries
     plan.total_out_bytes = total_out
@@ -871,6 +897,10 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             _remove_temp_path(validation_path)
         return 2
 
+    if args._max_output_bytes is not None and os.path.getsize(validation_path) > args._max_output_bytes:
+        raise CompressionGateError(
+            f'whole-file compression gate failed: {os.path.getsize(validation_path)} bytes exceeds '
+            f'{args._max_output_bytes}; metadata and protected tensors are included; output was not replaced')
     events.emit("phase", phase="publication")
     output_sha = sha256_file(validation_path)
     _publish_output(validation_path, out_path,

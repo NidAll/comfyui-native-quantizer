@@ -100,7 +100,7 @@ def _simulate_quantized_chunk(original_chunk: torch.Tensor,
       convrot_w4a4:    (x_int4/8 @ w_int4.T) * x_scale * w_scale
       asym_w4a8_int8:  (x_int8 * x_scale) @ dequant(W).T
     """
-    if fmt == FORMAT_INT8:
+    if fmt in (FORMAT_INT8, 'int8-convrot'):
         q, wscale = tensors[""], tensors["_scale"]
         return ((act_q.float() @ q.float().T)
                 * act_scale * wscale.float().reshape(1, -1))
@@ -128,7 +128,7 @@ def runtime_output_rel_l2(original: torch.Tensor,
                           tensors: Dict[str, torch.Tensor], fmt: str,
                           group_size: int, convrot_groupsize: int,
                           activations: torch.Tensor,
-                          w4a4_activation_bits: int = 8) -> Optional[float]:
+                          w4a4_activation_bits: int = 8, reduction: str = 'mean') -> Optional[float]:
     """mean over samples of ||Y_quant - Y_bf16|| / ||Y_bf16|| for the actual
     runtime operation (activation rotation, activation quantization, quantized
     GEMM with scales), not a reconstructed-weight approximation.
@@ -137,7 +137,7 @@ def runtime_output_rel_l2(original: torch.Tensor,
     target runtime (4 on eager regardless of linear_dtype, 4 or 8 on CUDA)."""
     x = activations.float()
     y_ref = x @ original.float().T
-    if fmt in (FORMAT_W4A4, FORMAT_W4A8, FORMAT_W6A8):
+    if fmt in (FORMAT_W4A4, FORMAT_W4A8, FORMAT_W6A8, 'int8-convrot'):
         h = build_hadamard(convrot_groupsize, device=x.device, dtype=torch.float32)
         x_rot = rotate_activation(x, h, convrot_groupsize)
     else:
@@ -152,7 +152,8 @@ def runtime_output_rel_l2(original: torch.Tensor,
                                     else "int8")
     num = (y_q - y_ref).norm(dim=1)
     den = y_ref.norm(dim=1).clamp(min=1e-8)
-    value = float((num / den).mean())
+    errors = num / den
+    value = float(torch.quantile(errors, .95) if reduction == 'p95' else errors.mean())
     return value if math.isfinite(value) else 1e30
 
 
@@ -168,9 +169,9 @@ class _OutputErrorAccumulator:
         self.num_sq += d.square().sum(dim=1)
         self.den_sq += y_ref.double().square().sum(dim=1)
 
-    def finish(self) -> float:
+    def finish(self, reduction='mean') -> float:
         ratio = (self.num_sq.sqrt() / self.den_sq.clamp(min=1e-16).sqrt())
-        value = float(ratio.mean())
+        value = float(torch.quantile(ratio, .95) if reduction == 'p95' else ratio.mean())
         return value if math.isfinite(value) else 1e30
 
 

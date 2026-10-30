@@ -331,7 +331,10 @@ class Validator:
                             and value.get("quant_group_size") ==
                             W4A4_QUANT_GROUP_SIZE
                             and value.get("linear_dtype") in ("int4", "int8"))
-                    # int8_tensorwise: format field only
+                    elif lfmt == FORMAT_INT8:
+                        conf_ok = conf_ok and bool(value.get('convrot', False)) == dec.convrot
+                        if dec.convrot:
+                            conf_ok = conf_ok and value.get('convrot') is True and value.get('convrot_groupsize') == 256
                 conf_ok = conf_ok and not mism
                 self.check("metadata-layer-conf", conf_ok,
                            "format/group/ConvRot fields valid" if conf_ok else
@@ -569,7 +572,8 @@ class Validator:
                                     dq = (reference_decode_w4a4(packed, scale,
                                                                 d.convrot_groupsize)
                                           if d.format == FORMAT_W4A4 else
-                                          reference_decode_int8(packed, scale))
+                                          reference_decode_int8(packed, scale,
+                                              convrot_groupsize=d.convrot_groupsize if d.convrot else None))
                                     acc.update(original_view[r0:r1], dq, None)
                                     if d.format == FORMAT_W4A4:
                                         rt = unpack_int4_signed(packed)
@@ -596,7 +600,8 @@ class Validator:
                                 dq = (reference_decode_w4a4(
                                     packed, scale, d.convrot_groupsize)
                                     if d.format == FORMAT_W4A4 else
-                                    reference_decode_int8(packed, scale))
+                                    reference_decode_int8(packed, scale,
+                                        convrot_groupsize=d.convrot_groupsize if d.convrot else None))
                             orig_t = reader.read_tensor(d.name).float()
                             m = compute_weight_metrics(orig_t, dq)
                             if d.format == FORMAT_W4A4:
@@ -726,14 +731,14 @@ class Validator:
                 compute_dtype = getattr(args, "_compute_dtype_tensor", torch.float32)
                 max_mem = getattr(args, "max_memory", 2 * 1024**3)
                 out1 = quantize_tensor_bounded(
-                    reader, d0.name, d0.format, d0.group_size,
+                    reader, d0.name, d0.encoding_format, d0.group_size,
                     d0.convrot_groupsize, max_mem, torch.device("cpu"),
                     compute_dtype=compute_dtype,
                     seed=getattr(args, "seed", 0),
                     codebook_mode=getattr(args, "codebook_mode", "auto"), optimization=optimization,
                     activations=layer_activations(getattr(args, '_optimization_calibration', None), d0.name))
                 out2 = quantize_tensor_bounded(
-                    reader, d0.name, d0.format, d0.group_size,
+                    reader, d0.name, d0.encoding_format, d0.group_size,
                     d0.convrot_groupsize, max_mem, torch.device("cpu"),
                     compute_dtype=compute_dtype,
                     seed=getattr(args, "seed", 0),

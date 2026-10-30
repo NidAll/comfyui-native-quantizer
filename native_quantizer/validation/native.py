@@ -78,9 +78,8 @@ def verify_native_output(path: str) -> Dict[str, Any]:
                     errors.append(f'{layer}: storage dimensions disagree with original dimensions')
                 if fmt == FORMAT_INT8 and ('convrot' in conf or 'convrot_groupsize' in conf):
                     group = conf.get('convrot_groupsize')
-                    allowed_groups = (16, 64, 256) if reference is not None else (256,)
                     if (conf.get('convrot') is not True or type(group) is not int
-                            or group not in allowed_groups or k % group):
+                            or group not in (16, 64, 256) or k % group):
                         errors.append(f'{layer}: invalid INT8 ConvRot parameters')
                 if fmt == FORMAT_W4A4:
                     group = conf.get('convrot_groupsize')

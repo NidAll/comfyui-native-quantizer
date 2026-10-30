@@ -2608,12 +2608,13 @@ def _test_mixed_bf16_promotion() -> str:
     det = detect_architecture(
         info, shape_lookup=lambda n: (info.by_name(n).shape if info.by_name(n) else None))
     dec = classify_tensors(info, det, FORMAT_MIXED, None, [], [], [], None, None)
-    # layer gate admits W4A8 (~0.07); the global gate is stricter than even
+    # layer gate admits W4A8 (~0.07); a zero global gate is stricter than even
     # INT8 (~0.008), so the greedy loop must promote layers all the way to
     # original precision, and the resulting passthrough-only plan must fail
     # the quality gate instead of publishing a copy of the input
     planner = MixedPlanner("balanced", None, 2 * 1024**3, torch.device("cpu"),
-                           None, layer_gate=0.10, global_gate=0.001)
+                           None, layer_gate=0.10, global_gate=0.,
+                           compression_target_bpp=4., max_bf16_fraction=1.)
     try:
         planner.plan(info, dec)
         raise AssertionError("passthrough-only plan accepted")

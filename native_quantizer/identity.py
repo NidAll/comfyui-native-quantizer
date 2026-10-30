@@ -98,7 +98,7 @@ W4A4_MAX_REL_L2 = 0.20
 INT8_MAX_REL_L2 = 0.05
 
 
-MIXED_PROFILES = ("auto", "balanced", "conservative", "size-first", "throughput")
+MIXED_PROFILES = ("auto", "balanced", "conservative", "size-first", "throughput", "adaptive")
 
 
 FORMAT_MIXED_REVISION = "mixed-r1"
@@ -110,7 +110,7 @@ W4A8_CONVROT_GROUPSIZE = 256
 QUANT_ALGORITHM_REVISION = "adaptive-codebook-searchsorted-r3"
 
 
-MIXED_PLANNER_REVISION = "kitchen-planner-r4"
+MIXED_PLANNER_REVISION = "kitchen-planner-r5"
 
 
 VALIDATION_REVISION = "validator-r5"  # independent reference decoders in recon checks

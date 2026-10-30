@@ -11,9 +11,10 @@ from pathlib import Path
 from native_quantizer import identity
 from native_quantizer.codecs import dispatch, rotation, w4a4, w6a8
 from native_quantizer.planning import metrics
+from native_quantizer.runtime.costs import runtime_fingerprint
 
 
-def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None, optimization=None):
+def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None, optimization=None, include_baseline=False):
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA is required for this probe')
     if min(n, k, m, repeats) <= 0 or k % 256:
@@ -33,7 +34,7 @@ def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None, opt
         group = w6a8_group_size if fmt == identity.FORMAT_W6A8 else 16
         cgs = w4a4._pick_w4a4_convrot_group(k) if fmt == identity.FORMAT_W4A4 else 256
         tensors = dispatch.quantize_weight_by_format(w, fmt, group, cgs, optimization=optimization)
-        conf = {'format': fmt}
+        conf = {'format': identity.FORMAT_INT8 if fmt == 'int8-convrot' else fmt}
         if fmt in identity.GROUPED_INT8_FORMATS:
             cls = kt.AsymW4A8Int8Layout
             params = cls.Params(scale=tensors['_s_rel'], s_channel=tensors['_s_channel'],
@@ -47,7 +48,9 @@ def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None, opt
             conf.update(convrot_groupsize=cgs, linear_dtype=f'int{bits}')
         else:
             cls = kt.TensorWiseINT8Layout
-            params = cls.Params(scale=tensors['_scale'], orig_dtype=x.dtype, orig_shape=(n, k))
+            extra = dict(convrot=True, convrot_groupsize=256) if fmt == 'int8-convrot' else {}
+            params = cls.Params(scale=tensors['_scale'], orig_dtype=x.dtype, orig_shape=(n, k), **extra)
+            conf.update(extra)
         if comfy_root:
             module = ops.mixed_precision_ops(compute_dtype=x.dtype).Linear(k, n, bias=False, device='cpu')
             sd = {'weight' + suffix: value for suffix, value in tensors.items()}
@@ -116,7 +119,22 @@ def run(n, k, m, repeats, comfy_root=None, w6a8_group_size=16, formats=None, opt
                                 simulation_agreement_rel_l2=agreement,
                                 graph_replay=True, native_loader=bool(comfy_root)))
             del graph, captured, output, y_ref
-    return {'shape': {'m': m, 'n': n, 'k': k}, 'repeats': repeats, 'results': results,
+    if include_baseline:
+        with torch.inference_mode():
+            dense = w.to(device='cuda', dtype=x.dtype)
+            for _ in range(5):
+                torch.nn.functional.linear(x, dense)
+            torch.cuda.synchronize()
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(repeats):
+                torch.nn.functional.linear(x, dense)
+            end.record()
+            end.synchronize()
+            results.append(dict(format=identity.FORMAT_ORIGINAL, activation_bits=16,
+                                group_size=None, warm_ms=start.elapsed_time(end) / repeats))
+    return {'shape': {'m': m, 'n': n, 'k': k}, 'dtype': 'bfloat16', 'weight': 1.,
+            'repeats': repeats, 'results': results,
             'optimization': optimization.to_dict() if optimization is not None else {'mode': 'none'}}
 
 
@@ -129,11 +147,22 @@ def main(argv=None) -> int:
     parser.add_argument('--comfy-root')
     parser.add_argument('--w6a8-group-size', type=int, default=16)
     parser.add_argument('--optimizer', choices=('none', 'mse'), default='none')
+    parser.add_argument('--workloads', help='JSON list of shape, weight and optional layer objects; overrides --m/--n/--k')
     args = parser.parse_args(argv)
     from native_quantizer.optimization import OptimizationConfig
-    sample = run(args.n, args.k, args.m, args.repeats, args.comfy_root, args.w6a8_group_size,
-                 optimization=OptimizationConfig(args.optimizer, 'weight'))
-    print(json.dumps({'schema': 'kitchen-costs/v2',
+    workloads = json.loads(Path(args.workloads).read_text()) if args.workloads else [
+        {'shape': dict(n=args.n, k=args.k, m=args.m)}]
+    samples = []
+    for workload in workloads:
+        shape = workload['shape']
+        sample = run(shape['n'], shape['k'], shape['m'], args.repeats, args.comfy_root,
+                     args.w6a8_group_size,
+                     formats=((identity.FORMAT_INT8, 8), ('int8-convrot', 8), (identity.FORMAT_W4A4, 4),
+                              (identity.FORMAT_W4A4, 8), (identity.FORMAT_W4A8, 8), (identity.FORMAT_W6A8, 8)),
+                     optimization=OptimizationConfig(args.optimizer, 'weight'), include_baseline=True)
+        sample.update(weight=workload.get('weight', 1.), layer=workload.get('layer'))
+        samples.append(sample)
+    print(json.dumps({'schema': 'kitchen-costs/v3', 'runtime_fingerprint': runtime_fingerprint(),
                       'kitchen_version': importlib.metadata.version('comfy-kitchen'),
-                      'benchmarks': [sample]}, indent=2))
+                      'benchmarks': samples}, indent=2))
     return 0

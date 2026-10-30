@@ -88,6 +88,14 @@ def headers():
         'vision_tower.encoder.layers.0.self_attn.q_proj.weight': (1152, 1152),
         'merger.mlp.0.linear_2.weight': (1024, 4608),
     }
+    cases['lfm3_vl_2b'] = {
+        'language_model.embed_tokens.weight': (128000, 2048),
+        'language_model.layers.0.conv.in_proj.weight': (6144, 2048),
+        'language_model.layers.0.feed_forward.w1.weight': (7680, 2048),
+        'language_model.layers.2.self_attn.k_proj.weight': (512, 2048),
+        'vision_tower.patchifier.weight': (1024, 1536),
+        'multi_modal_projector.linear_2.weight': (2048, 4096),
+    }
     cases['fibo2'] = {
         'perceiver.latent_queries': (512, 256),
         'layers.0.attention.qkv.weight': (768, 256),

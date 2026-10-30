@@ -57,7 +57,8 @@ def layer_quant_config(d: TensorDecision) -> Dict[str, Any]:
                 "quant_group_size": W4A4_QUANT_GROUP_SIZE,
                 "linear_dtype": d.linear_dtype or DEFAULT_W4A4_LINEAR_DTYPE}
     if d.format == FORMAT_INT8:
-        return {"format": d.format}
+        return ({'format': d.format, 'convrot': True, 'convrot_groupsize': d.convrot_groupsize}
+                if d.convrot else {"format": d.format})
     raise PolicyError(f"unknown per-layer format {d.format!r}")
 
 
@@ -266,7 +267,7 @@ def build_extension_metadata(info: CheckpointInfo, plan: ConversionPlan,
                 "weight_quantization": "rowwise symmetric int8 (absmax/127)",
                 "scale_dtype": "fp32 rowwise [N,1]",
                 "packing": "none",
-                "convrot": False,
+                "convrot": 'per layer' if any(d.convrot for d in quant_layers) else False,
             },
         }
         mp = plan.mixed_plan or {}
@@ -299,15 +300,19 @@ def build_extension_metadata(info: CheckpointInfo, plan: ConversionPlan,
             "profile": mp.get("profile"),
             "layer_gate": mp.get("layer_gate"),
             "global_gate": mp.get("global_gate"),
+            "planning": {key: mp.get(key) for key in (
+                'error_metric', 'quality_reference', 'reference_error', 'reference_fallbacks',
+                'calibration_digest', 'kernel_costs_sha256', 'measured_workloads',
+                'precision_exchanges', 'exchange_error_before', 'exchange_error_after',
+                'whole_file_byte_limit', 'int8_convrot_layers')},
             "runtime_backend": mp.get("runtime_backend"),
             "w4a4_runtime": _w4a4_runtime_block(plan, args),
             "quality_validation": {
                 "level": ("calibrated" if calibration is not None
                           else "unverified"),
                 "reference_precision": "bf16/fp16 source",
-                "note": ("calibrated = runtime-output layer calibration; "
-                         "model-verified and e2e-verified levels are produced "
-                         "by testdata/model_quality.py on the target machine"),
+                "note": ("calibrated = sampled runtime-output layer error; "
+                         "held-out model outputs and end-to-end quality require separate evaluation"),
             },
             "compute_dtype": getattr(args, "compute_dtype", "auto"),
             "effective_compute_dtype": torch_dtype_name(

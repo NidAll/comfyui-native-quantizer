@@ -80,6 +80,7 @@ MIXED_PROFILE_DEFAULTS = {
     "balanced": MixedProfile("balanced", 0.10, 0.080, 0.90, 0.05),
     "conservative": MixedProfile("conservative", 0.05, 0.040, 1.05, 0.02),
     "size-first": MixedProfile("size-first", 0.15, 0.100, 0.75, 0.10),
+    "adaptive": MixedProfile("adaptive", 0.08, 0.040, 0.90, 0.15),
 }
 
 
@@ -125,20 +126,29 @@ class MixedPlanner:
                  objective: str = "kitchen",
                  kernel_costs: Optional[Dict] = None,
                  enable_w6a8: bool = False, w6a8_group_size: int = 16,
-                 optimization=None):
+                 optimization=None, workloads=(), target_bytes=None, optimization_calibration=None,
+                 enable_int8_convrot=False, quality_reference='none'):
         self.optimization = optimization or OptimizationConfig()
         if objective not in ("kitchen", "size"):
             raise PolicyError(f"unknown mixed objective {objective!r}")
         self.enable_w6a8 = enable_w6a8
+        self.enable_int8_convrot = enable_int8_convrot or profile_name == 'adaptive'
         self.w6a8_group_size = w6a8_group_size
         if w6a8_group_size <= 0 or w6a8_group_size % 16:
             raise PolicyError("W6A8 group size must be a positive multiple of 16")
         self.objective = objective
         self.kernel_costs = kernel_costs or {}
+        self.workloads = workloads
+        self.target_bytes = target_bytes
+        self.quality_reference = quality_reference
+        self.reference_error = None
+        self.reference_fallbacks = {}
+        self._fixed_bytes = 0
         if profile_name not in MIXED_PROFILE_DEFAULTS:
             raise PolicyError(f"unknown mixed profile {profile_name!r}")
         self.profile = MIXED_PROFILE_DEFAULTS[profile_name]
         self.calibration = calibration
+        self.optimization_calibration = optimization_calibration or calibration
         self.max_mem = max_mem
         self.device = device
         self.compute_dtype = compute_dtype
@@ -157,6 +167,7 @@ class MixedPlanner:
                            else self.profile.layer_gate)
         self.global_gate = (global_gate if global_gate is not None
                             else self.profile.global_gate)
+        self._configured_global_gate = self.global_gate
         self.compression_target_bpp = (
             compression_target_bpp if compression_target_bpp is not None
             else self.profile.compression_target_bpp)
@@ -167,6 +178,9 @@ class MixedPlanner:
         self.promotions: List[str] = []
         self.summary: Dict[str, Any] = {}
         self._targeted: List[TensorDecision] = []
+        self.encoded_cache = {}
+        self.codebooks = {}
+        self._cache_bytes = 0
 
     # -- eligibility -------------------------------------------------------
     def eligible_formats(self, meta: TensorMeta, token_embedding: bool = False) -> List[str]:
@@ -189,9 +203,12 @@ class MixedPlanner:
                 pass
         if self.runtime.supports(FORMAT_INT8):
             out.append(FORMAT_INT8)
+            if self.enable_int8_convrot and k % 256 == 0 and FORMAT_INT8 not in self.disabled:
+                out.append('int8-convrot')
         return [f for f in out if f not in self.disabled]
 
     def runtime_reason(self, fmt: str) -> str:
+        fmt = FORMAT_INT8 if fmt == 'int8-convrot' else fmt
         if not self.runtime.supports(fmt):
             return f"not supported on target runtime {self.runtime.target}"
         return f"{self.runtime.describe(fmt)} on {self.runtime.target}"
@@ -238,6 +255,13 @@ class MixedPlanner:
                 return stats["samples"]
         return None
 
+    def _encoding_activations(self, name):
+        if self.optimization_calibration is not None:
+            for key in (name, name.removesuffix('.weight')):
+                if key in self.optimization_calibration.layers:
+                    return self.optimization_calibration.layers[key]['samples']
+        return None
+
     def _evaluate_format(self, reader: CheckpointReader, d: TensorDecision,
                          fmt: str) -> TensorMetrics:
         if fmt == FORMAT_W6A8:
@@ -247,6 +271,12 @@ class MixedPlanner:
             raise PolicyError(f"planner references missing tensor {d.name!r}")
         cgs = self.cgs_for(int(meta.shape[1]), fmt)
         activations = self._activations(d.name)
+        encoding_activations = self._encoding_activations(d.name)
+        reduction = 'p95' if self.profile.name == 'adaptive' else 'mean'
+        work_bytes = _quant_work_bytes(meta, fmt, self.optimization)
+        if work_bytes + self._cache_bytes > self.max_mem:
+            self.encoded_cache.clear()
+            self._cache_bytes = 0
         if _quant_work_bytes(meta, fmt, self.optimization) <= self.max_mem:
             w = reader.read_tensor(d.name)
             w = w.to(device=self.device, dtype=(self.compute_dtype
@@ -255,7 +285,7 @@ class MixedPlanner:
                 q = quantize_weight_by_format(
                     w, fmt, d.group_size, cgs, seed=self.seed,
                     codebook_mode=self.codebook_mode, optimization=self.optimization,
-                    activations=activations)
+                    activations=encoding_activations)
                 dq = dequantize_weight_by_format(q, fmt, d.group_size, cgs,
                                                  torch.float32)
                 metrics = compute_weight_metrics(w, dq)
@@ -267,7 +297,7 @@ class MixedPlanner:
                             runtime_output_rel_l2(
                                 w, q, fmt,
                                 d.group_size, cgs, activations,
-                                w4a4_activation_bits=bits)
+                                w4a4_activation_bits=bits, reduction=reduction)
                             for bits in modes
                         ]
                         metrics.act_rel_l2 = max(errs)  # worst case
@@ -275,7 +305,8 @@ class MixedPlanner:
                         metrics.act_rel_l2 = runtime_output_rel_l2(
                             w, q, fmt,
                             d.group_size, cgs, activations,
-                            w4a4_activation_bits=8)
+                            w4a4_activation_bits=8, reduction=reduction)
+                self._cache_encoding(d.name, fmt, q, max(0, self.max_mem - work_bytes))
             finally:
                 del w
             return metrics
@@ -291,7 +322,7 @@ class MixedPlanner:
         act_qs = act_scales = None
         if activations is not None:
             x = activations.float()
-            if fmt in (FORMAT_W4A4, FORMAT_W4A8, FORMAT_W6A8):
+            if fmt in (FORMAT_W4A4, FORMAT_W4A8, FORMAT_W6A8, 'int8-convrot'):
                 h = build_hadamard(cgs, device=x.device, dtype=torch.float32)
                 x_rot = rotate_activation(x, h, cgs)
             else:
@@ -317,6 +348,7 @@ class MixedPlanner:
                 reader, d.name, k, d.group_size, cgs, sample_size, chunk_rows,
                 compute_dtype=self.compute_dtype, seed=self.seed,
                 codebook_mode=self.codebook_mode)
+            self._remember_codebook(d.name, codebook)
             for r0 in range(0, n, chunk_rows):
                 r1 = min(n, r0 + chunk_rows)
                 q = _quantize_row_chunk(reader, d.name, r0, r1, d.group_size,
@@ -325,7 +357,7 @@ class MixedPlanner:
                                         als_iterations=(
                                             3 if self.codebook_mode == "fit"
                                             else W4A8_ALS_ITERS), optimization=self.optimization,
-                                        activations=activations)
+                                        activations=encoding_activations)
                 dq = dequantize_weight_by_format(q, FORMAT_W4A8, d.group_size,
                                                  cgs, torch.float32)
                 orig_chunk = reader.read_tensor(d.name)[r0:r1]
@@ -350,7 +382,7 @@ class MixedPlanner:
                 q = quantize_weight_by_format(
                     chunk, fmt, d.group_size, cgs, seed=self.seed,
                     codebook_mode=self.codebook_mode, optimization=self.optimization,
-                    activations=activations)
+                    activations=encoding_activations)
                 dq = dequantize_weight_by_format(q, fmt, d.group_size, cgs,
                                                  torch.float32)
                 chunk_cpu = chunk.cpu()
@@ -374,18 +406,56 @@ class MixedPlanner:
                 del chunk, chunk_cpu, q, q_cpu, dq
         metrics = acc.finish()
         if out_acc is not None:
-            metrics.act_rel_l2 = out_acc.finish()
+            metrics.act_rel_l2 = out_acc.finish(reduction)
         if out_accs is not None:
-            metrics.act_rel_l2 = max(oacc.finish() for oacc in out_accs.values())
+            metrics.act_rel_l2 = max(oacc.finish(reduction) for oacc in out_accs.values())
         return metrics
+
+    def _cache_encoding(self, name, fmt, tensors, available):
+        if self.profile.name != 'adaptive':
+            return
+        if fmt == FORMAT_W4A8:
+            self._remember_codebook(name, tensors['_codebook'])
+        size = sum(t.numel() * t.element_size() for t in tensors.values())
+        codebook_bytes = sum(t.numel() * t.element_size() for t in self.codebooks.values())
+        limit = min(self.max_mem // 8, available) - codebook_bytes
+        if size > limit:
+            return
+        while self.encoded_cache and self._cache_bytes + size > limit:
+            oldest = next(iter(self.encoded_cache))
+            record = self.encoded_cache.pop(oldest)
+            self._cache_bytes -= record[1]
+        self.encoded_cache[(name, fmt)] = ({k: v.detach().cpu().clone() for k, v in tensors.items()}, size)
+        self._cache_bytes += size
+
+    def _remember_codebook(self, name, codebook):
+        if self.profile.name == 'adaptive':
+            if len(self.codebooks) >= max(1, self.max_mem // 4096):
+                self.codebooks.pop(next(iter(self.codebooks)))
+            self.codebooks[name] = codebook.detach().cpu().clone()
+
+    def selected_encodings(self):
+        return {d.name: self.encoded_cache[(d.name, d.encoding_format)][0]
+                for d in self._targeted if d.kind == DecisionKind.QUANTIZE
+                and (d.name, d.encoding_format) in self.encoded_cache}
 
     # -- planning ----------------------------------------------------------
     def plan(self, info: CheckpointInfo,
              decisions: List[TensorDecision]) -> Dict[str, Any]:
         self.candidates.clear()
         self.promotions.clear()
+        self.encoded_cache.clear()
+        self.codebooks.clear()
+        self._cache_bytes = 0
+        self.exchanges = []
+        self._exchange_error_before = self._exchange_error_after = None
+        self.global_gate = self._configured_global_gate
+        self.reference_error = None
+        self.reference_fallbacks = {}
         self._targeted = [d for d in decisions
                           if d.kind == DecisionKind.QUANTIZE]
+        targeted = {d.name for d in self._targeted}
+        self._fixed_bytes = sum(t.nbytes for t in info.tensors if t.name not in targeted)
         with CheckpointReader(info) as reader:
             for d in self._targeted:
                 meta = info.by_name(d.name)
@@ -460,14 +530,36 @@ class MixedPlanner:
                     weight_rel_l2=0.0, act_rel_l2=0.0)
                 self.candidates[d.name] = cands
 
-        selected, kept = self.select(info, decisions)
+        if self.quality_reference != 'none':
+            reference = FORMAT_W6A8 if self.quality_reference == 'w6a8' else FORMAT_INT8
+            numerator, denominator = 0., 0
+            for d in self._targeted:
+                candidates = self.candidates[d.name]
+                choice = next((candidates[f] for f in (reference, FORMAT_INT8, FORMAT_ORIGINAL)
+                               if f in candidates and candidates[f].eligible), candidates[FORMAT_ORIGINAL])
+                if choice.format != reference:
+                    self.reference_fallbacks[d.name] = choice.format
+                params = self._layer_params(info, d)
+                numerator += self._error_of(choice) * params
+                denominator += params
+            self.reference_error = numerator / max(denominator, 1)
+            self.global_gate = min(self.global_gate, self.reference_error)
+        self.select(info, decisions)
         promoted = self.promote(info, decisions) if self.global_gate is not None else []
-        self._enforce_gates(info, decisions)
+        try:
+            self._enforce_gates(info, decisions)
+        except (QualityGateError, CompressionGateError):
+            if not self.repair_feasibility(info):
+                raise
+            self._enforce_gates(info, decisions)
         self.optimize_execution(info)
+        if self.profile.name == 'adaptive' and self.objective != 'size':
+            self.optimize_exchanges(info)
         self._enforce_gates(info, decisions)
         self.summary = self._summarize(info, decisions)
         self.summary.update({
-            "selected": selected, "kept": kept, "promotions": promoted,
+            "selected": sum(d.kind == DecisionKind.QUANTIZE for d in self._targeted),
+            "kept": sum(d.kind != DecisionKind.QUANTIZE for d in self._targeted), "promotions": promoted,
             "runtime_backend": self.runtime.target,
             "objective": self.objective,
             "execution_optimizations": self.execution_optimizations,
@@ -478,20 +570,168 @@ class MixedPlanner:
 
     def execution_contract(self, d: TensorDecision, fmt: str):
         mode = self.w4a4_execution_mode_for_candidate()
-        return kernel_contract(
-            fmt, backend=self.runtime.target,
-            accelerated=self.runtime.capability(fmt).accelerated,
+        native = FORMAT_INT8 if fmt == 'int8-convrot' else fmt
+        contract = kernel_contract(
+            native, backend=self.runtime.target,
+            accelerated=self.runtime.capability(native).accelerated,
             activation_bits=mode.activation_bits if fmt == FORMAT_W4A4 else 8,
             certain=mode.certain,
             embedding=d.component == COMPONENT_TEXT_ENCODER
             and bool(TEXT_TOKEN_EMBEDDING.search(d.name)))
+        return dataclasses.replace(contract, activation_transform=True) if fmt == 'int8-convrot' else contract
 
-    def measured_cost(self, shape, fmt, activation_bits):
+    def measured_cost(self, shape, fmt, activation_bits, layer=None):
         group = self.w6a8_group_size if fmt == FORMAT_W6A8 else 16 if fmt == FORMAT_W4A8 else None
+        samples = [w for w in self.workloads if (w['n'], w['k']) == tuple(shape)]
+        if any(len(key) == 7 for key in self.kernel_costs):
+            specific = [w for w in samples if w.get('layer') == layer and layer is not None]
+            samples = specific or [w for w in samples if w.get('layer') is None]
+            values = [(self.kernel_costs.get((*shape, fmt, activation_bits, group, w['m'], w.get('layer'))),
+                       w.get('weight', 1.)) for w in samples]
+            if not values or any(value is None for value, _ in values):
+                return None
+            return sum(value * weight for value, weight in values)
         value = self.kernel_costs.get((*shape, fmt, activation_bits, group))
         if value is None and fmt != FORMAT_W6A8:
             value = self.kernel_costs.get((*shape, fmt, activation_bits))
         return value
+
+    def byte_limit(self, info):
+        params = sum(self._layer_params(info, d) for d in self._targeted)
+        limit = self.compression_target_bpp * params if self.compression_target_bpp is not None else math.inf
+        if self.target_bytes is not None:
+            limit = min(limit, self.target_bytes - self._fixed_bytes)
+        return limit
+
+    def selected_bytes(self, info):
+        return sum(self.candidates[d.name][d.encoding_format].estimated_bytes
+                   if d.kind == DecisionKind.QUANTIZE else info.by_name(d.name).nbytes
+                   for d in self._targeted)
+
+    def repair_feasibility(self, info):
+        """Bounded frontier search when greedy upgrades exhaust the byte budget.
+
+        Buckets retain the cheapest prefix at similar error/original storage.
+        Exact hard gates are checked after selection, never on bucket estimates.
+        This is a feasibility repair, not a claim of globally optimal allocation.
+        """
+        limit = self.byte_limit(info)
+        params = sum(self._layer_params(info, d) for d in self._targeted)
+        error_limit = (self.global_gate if self.global_gate is not None else self.layer_gate) * params
+        choices = []
+        for d in self._targeted:
+            choices.append([c for c in self.candidates[d.name].values() if c.eligible
+                            and self._error_of(c) is not None and self._error_of(c) <= self.layer_gate])
+        remaining = sum(min(c.estimated_bytes for c in cs) for cs in choices)
+        states = [(0, 0., 0, ())]
+        for d, candidates in zip(self._targeted, choices):
+            remaining -= min(c.estimated_bytes for c in candidates)
+            buckets = {}
+            for used, error, original, path in states:
+                for c in candidates:
+                    size = used + c.estimated_bytes
+                    next_error = error + self._error_of(c) * self._layer_params(info, d)
+                    next_original = original + (c.estimated_bytes if c.format == FORMAT_ORIGINAL else 0)
+                    if (size + remaining > limit or next_error > error_limit + 1e-12
+                            or next_original > self.max_bf16_fraction * limit):
+                        continue
+                    key = (int(256 * next_error / max(error_limit, 1e-12)),
+                           int(32 * next_original / max(self.max_bf16_fraction * limit, 1)))
+                    state = (size, next_error, next_original, path + (c.format,))
+                    if key not in buckets or state < buckets[key]:
+                        buckets[key] = state
+            states = sorted(buckets.values(), key=lambda s: (
+                s[0] / max(limit, 1) + s[1] / max(error_limit, 1e-12), s))[:512]
+            if not states:
+                return False
+        feasible = [s for s in states if s[2] <= self.max_bf16_fraction * s[0]
+                    and any(fmt != FORMAT_ORIGINAL for fmt in s[3])]
+        if not feasible:
+            return False
+        chosen = min(feasible)
+        for d, fmt in zip(self._targeted, chosen[3]):
+            if d.encoding_format != fmt:
+                self.promotions.append(f'{d.name}:{fmt} (budget feasibility repair)')
+            self._apply_candidate(info, d, self.candidates[d.name][fmt])
+            d.reason = 'mixed planner: budget feasibility repair'
+        return True
+
+    def _apply_candidate(self, info, d, candidate):
+        d.kind = DecisionKind.KEEP_PRECISION if candidate.format == FORMAT_ORIGINAL else DecisionKind.QUANTIZE
+        d.convrot = candidate.format == 'int8-convrot'
+        d.format = FORMAT_INT8 if d.convrot else candidate.format
+        d.group_size = self.w6a8_group_size if d.format == FORMAT_W6A8 else 16
+        d.convrot_groupsize = self.cgs_for(int(info.by_name(d.name).shape[1]), d.format)
+        d.linear_dtype = self.linear_dtype if d.format == FORMAT_W4A4 else None
+
+    def candidate_cost(self, info, d, candidate):
+        bits = 16 if candidate.format == FORMAT_ORIGINAL else self.execution_contract(d, candidate.format).activation_bits
+        return self.measured_cost(tuple(info.by_name(d.name).shape), candidate.format, bits, d.name)
+
+    def optimize_exchanges(self, info):
+        """Trade precision between two layers without spending held-out error.
+
+        Unlike a local upgrade rule, a faster W6->W4 choice may pay for a
+        compensating W4->W6/INT8 choice. Both native workload costs must be
+        measured; the aggregate error, byte and original-precision gates hold.
+        """
+        self.exchanges = []
+        before = self.global_mean_error(info, self._targeted)
+        for _ in range(min(32, len(self._targeted))):
+            used = self.selected_bytes(info)
+            original = sum(info.by_name(d.name).nbytes for d in self._targeted
+                           if d.kind != DecisionKind.QUANTIZE)
+            moves = []
+            for d in self._targeted:
+                current = self.candidates[d.name][d.encoding_format]
+                current_ms = self.candidate_cost(info, d, current)
+                if current_ms is None:
+                    continue
+                for candidate in self.candidates[d.name].values():
+                    error = self._error_of(candidate)
+                    if not candidate.eligible or candidate.format == d.encoding_format or error is None or error > self.layer_gate:
+                        continue
+                    target_ms = self.candidate_cost(info, d, candidate)
+                    if target_ms is None:
+                        continue
+                    delta_error = (error - self._error_of(current)) * self._layer_params(info, d)
+                    delta_bytes = candidate.estimated_bytes - current.estimated_bytes
+                    delta_original = (candidate.estimated_bytes if candidate.format == FORMAT_ORIGINAL else 0) - (
+                        current.estimated_bytes if current.format == FORMAT_ORIGINAL else 0)
+                    moves.append((target_ms - current_ms, delta_error, delta_bytes,
+                                  delta_original, current_ms, d, candidate))
+            # Bound pair search while retaining both fast trades and quality rescues.
+            fast = sorted((m for m in moves if m[0] < 0), key=lambda m: (m[0], m[5].name, m[6].format))[:64]
+            rescue = sorted(moves, key=lambda m: (m[1], m[0], m[5].name, m[6].format))[:64]
+            best = None
+            for first in fast:
+                for second in [None, *rescue]:
+                    if second is not None and first[5] is second[5]:
+                        continue
+                    changes = (first,) if second is None else (first, second)
+                    delta_ms, delta_error, delta_bytes, delta_original, current_ms = (
+                        sum(m[i] for m in changes) for i in range(5))
+                    total = used + delta_bytes
+                    if (delta_ms >= -.02 * current_ms or delta_error > 1e-12
+                            or total > self.byte_limit(info)
+                            or original + delta_original > self.max_bf16_fraction * total
+                            or all((next((m[6].format for m in changes if m[5] is d), d.format)
+                                    == FORMAT_ORIGINAL) for d in self._targeted)):
+                        continue
+                    rank = (delta_ms, delta_error, delta_bytes, tuple(m[5].name for m in changes))
+                    if best is None or rank < best[0]:
+                        best = (rank, changes)
+            if best is None:
+                break
+            changes = []
+            for delta_ms, delta_error, delta_bytes, _, _, d, candidate in best[1]:
+                changes.append(dict(layer=d.name, previous=d.encoding_format, selected=candidate.format,
+                                    delta_ms=delta_ms, delta_weighted_error=delta_error, delta_bytes=delta_bytes))
+                self._apply_candidate(info, d, candidate)
+                d.reason = 'adaptive measured exchange; held-out error budget preserved'
+            self.exchanges.append(changes)
+        self._exchange_error_before = before
+        self._exchange_error_after = self.global_mean_error(info, self._targeted)
 
     def optimize_execution(self, info: CheckpointInfo) -> None:
         """Spend remaining storage budget on removing runtime weight expansion.
@@ -504,24 +744,23 @@ class MixedPlanner:
         if self.objective == "size" or self.profile.name == "size-first":
             return
         params = sum(self._layer_params(info, d) for d in self._targeted)
-        used = sum(self.candidates[d.name][d.format].estimated_bytes
+        used = sum(self.candidates[d.name][d.encoding_format].estimated_bytes
                    if d.kind == DecisionKind.QUANTIZE else info.by_name(d.name).nbytes
                    for d in self._targeted)
-        limit = (self.compression_target_bpp * params
-                 if self.compression_target_bpp is not None else math.inf)
+        limit = self.byte_limit(info)
         upgrades = []
         for d in self._targeted:
             if d.kind != DecisionKind.QUANTIZE:
                 continue
-            current = self.candidates[d.name][d.format]
-            contract = self.execution_contract(d, d.format)
+            current = self.candidates[d.name][d.encoding_format]
+            contract = self.execution_contract(d, d.encoding_format)
             for candidate in self.candidates[d.name].values():
                 if not candidate.eligible or candidate.format == FORMAT_ORIGINAL:
                     continue
                 target = self.execution_contract(d, candidate.format)
                 shape = tuple(info.by_name(d.name).shape)
-                current_ms = self.measured_cost(shape, d.format, contract.activation_bits)
-                target_ms = self.measured_cost(shape, candidate.format, target.activation_bits)
+                current_ms = self.measured_cost(shape, d.encoding_format, contract.activation_bits, d.name)
+                target_ms = self.measured_cost(shape, candidate.format, target.activation_bits, d.name)
                 measured = current_ms is not None and target_ms is not None
                 benefit = ((current_ms - target_ms) if measured else
                            self._layer_params(info, d) * (contract.preference - target.preference))
@@ -541,10 +780,7 @@ class MixedPlanner:
                 continue
             d = by_name[name]
             previous = d.format
-            d.format = fmt
-            d.group_size = self.w6a8_group_size if fmt == FORMAT_W6A8 else 16
-            d.convrot_groupsize = self.cgs_for(int(info.by_name(name).shape[1]), fmt)
-            d.linear_dtype = self.linear_dtype if fmt == FORMAT_W4A4 else None
+            self._apply_candidate(info, d, self.candidates[name][fmt])
             reason = "avoid weight expansion" if heuristic else "measured lower latency"
             d.reason = f"Kitchen policy: {previous} -> {fmt}; {reason}"
             used += extra
@@ -582,18 +818,13 @@ class MixedPlanner:
                 continue
             meta = info.by_name(d.name)
             if chosen.format == FORMAT_ORIGINAL:
-                d.kind = DecisionKind.KEEP_PRECISION
-                d.format = FORMAT_ORIGINAL
+                self._apply_candidate(info, d, chosen)
                 d.reason = ("mixed planner: original precision (no quantized "
                             "format within quality gate "
                             f"{self.layer_gate})")
                 kept += 1
                 continue
-            d.format = chosen.format
-            d.group_size = self.w6a8_group_size if chosen.format == FORMAT_W6A8 else 16
-            d.convrot_groupsize = self.cgs_for(int(meta.shape[1]), chosen.format)
-            d.linear_dtype = (self.linear_dtype if chosen.format == FORMAT_W4A4
-                              else None)
+            self._apply_candidate(info, d, chosen)
             d.reason = f"mixed planner: {chosen.format}"
             selected += 1
         return selected, kept
@@ -618,7 +849,7 @@ class MixedPlanner:
             if w == 0:
                 continue
             if d.kind == DecisionKind.QUANTIZE:
-                cand = self.candidates.get(d.name, {}).get(d.format)
+                cand = self.candidates.get(d.name, {}).get(d.encoding_format)
                 err = self._error_of(cand)
                 if err is None:
                     continue
@@ -638,7 +869,7 @@ class MixedPlanner:
         for d in decisions:
             if d.kind != DecisionKind.QUANTIZE:
                 continue
-            cand = self.candidates.get(d.name, {}).get(d.format)
+            cand = self.candidates.get(d.name, {}).get(d.encoding_format)
             err = self._error_of(cand)
             if err is None:
                 continue
@@ -666,45 +897,42 @@ class MixedPlanner:
             if mean is None or mean <= self.global_gate:
                 break
             best: Optional[Tuple[float, TensorDecision, CandidateResult]] = None
+            used, limit = self.selected_bytes(info), self.byte_limit(info)
             for d in self._targeted:
                 if d.kind != DecisionKind.QUANTIZE:
                     continue
                 meta = info.by_name(d.name)
                 n, k = int(meta.shape[0]), int(meta.shape[1])
-                cur = self.candidates.get(d.name, {}).get(d.format)
+                cur = self.candidates.get(d.name, {}).get(d.encoding_format)
                 cur_err = self._error_of(cur)
                 if cur_err is None:
                     continue
-                cur_bytes = quantized_format_bytes(n, k, d.format)
+                cur_bytes = cur.estimated_bytes
                 # all upgrades, original precision included as a candidate:
                 # the optimizer picks whichever gives the best marginal
                 # error reduction per byte (W4A4->W4A8, W4A4->INT8,
                 # W4A8->INT8, any -> original)
                 for fmt, cand in self.candidates.get(d.name, {}).items():
-                    if fmt == d.format or not cand.eligible:
+                    if fmt == d.encoding_format or not cand.eligible:
                         continue
                     cand_err = self._error_of(cand)
                     if cand_err is None or cand_err >= cur_err:
                         continue
                     extra = max(cand.estimated_bytes - cur_bytes, 1)
-                    ratio = (cur_err - cand_err) / float(extra)
+                    if used + cand.estimated_bytes - cur_bytes > limit:
+                        continue
+                    ratio = self._layer_params(info, d) * (cur_err - cand_err) / float(extra)
                     if best is None or ratio > best[0]:
                         best = (ratio, d, cand)
             if best is None:
                 break
             _, d, cand = best
             if cand.format == FORMAT_ORIGINAL:
-                d.kind = DecisionKind.KEEP_PRECISION
-                d.format = FORMAT_ORIGINAL
+                self._apply_candidate(info, d, cand)
                 d.reason = "mixed planner (promoted): original precision"
             else:
                 meta = info.by_name(d.name)
-                d.format = cand.format
-                d.group_size = self.w6a8_group_size if cand.format == FORMAT_W6A8 else 16
-                d.convrot_groupsize = self.cgs_for(
-                    int(meta.shape[1]), cand.format)
-                d.linear_dtype = (self.linear_dtype
-                                  if cand.format == FORMAT_W4A4 else None)
+                self._apply_candidate(info, d, cand)
                 d.reason = f"mixed planner (promoted): {cand.format}"
             # measure AFTER applying, so the log shows the new mean
             mean_after = self.global_mean_error(info, decisions)
@@ -738,13 +966,13 @@ class MixedPlanner:
                 and final_error > self.global_gate):
             worst = self._top_contributors(
                 info, key=lambda d: (self._error_of(
-                    self.candidates.get(d.name, {}).get(d.format)) or 0.0)
+                    self.candidates.get(d.name, {}).get(d.encoding_format)) or 0.0)
                     * self._layer_params(info, d))
             quant_bits = sorted({
-                self.candidates.get(d.name, {}).get(d.format).format
+                self.candidates.get(d.name, {}).get(d.encoding_format).format
                 for d in self._targeted
                 if d.kind == DecisionKind.QUANTIZE
-                and self.candidates.get(d.name, {}).get(d.format) is not None})
+                and self.candidates.get(d.name, {}).get(d.encoding_format) is not None})
             raise QualityGateError(
                 f"quality gate failed: targeted weighted mean error "
                 f"{final_error:.6f} > global gate {self.global_gate:.6f} "
@@ -763,12 +991,14 @@ class MixedPlanner:
             n, k = int(meta.shape[0]), int(meta.shape[1])
             params += n * k
             if d.kind == DecisionKind.QUANTIZE:
-                quant_bytes += quantized_format_bytes(n, k, d.format)
+                quant_bytes += self.candidates[d.name][d.encoding_format].estimated_bytes
             else:
                 kept_bytes += meta.nbytes
                 kept_params += n * k
                 kept_by_name.append((d.name, meta.nbytes))
         effective_bpp = (quant_bytes + kept_bytes) / max(params, 1)
+        if self.target_bytes is not None and quant_bytes + kept_bytes + self._fixed_bytes > self.target_bytes:
+            raise CompressionGateError('whole-file tensor payload exceeds --target-compression budget; protected tensors are included')
         original_byte_fraction = kept_bytes / max(quant_bytes + kept_bytes, 1)
         original_param_fraction = kept_params / max(params, 1)
         if self.compression_target_bpp is not None \
@@ -816,7 +1046,7 @@ class MixedPlanner:
                 counts[d.format] = counts.get(d.format, 0) + 1
                 layer_params[d.format] = layer_params.get(d.format, 0) + n * k
                 layer_bytes[d.format] = layer_bytes.get(
-                    d.format, 0) + quantized_format_bytes(n, k, d.format)
+                    d.format, 0) + self.candidates[d.name][d.encoding_format].estimated_bytes
             else:
                 kept_params += n * k
                 kept_bytes += meta.nbytes
@@ -824,6 +1054,15 @@ class MixedPlanner:
         q_mean = self.quantized_weighted_error(info, decisions)
         return {
             "profile": self.profile.name,
+            "quality_reference": self.quality_reference,
+            "reference_error": self.reference_error,
+            "reference_fallbacks": self.reference_fallbacks,
+            "int8_convrot_layers": [d.name for d in self._targeted if d.convrot],
+            "error_metric": 'heldout-p95-runtime-output-relL2' if self.profile.name == 'adaptive' else 'activation-mean-or-weight-relL2',
+            "precision_exchanges": getattr(self, 'exchanges', []),
+            "exchange_error_before": getattr(self, '_exchange_error_before', None),
+            "exchange_error_after": getattr(self, '_exchange_error_after', None),
+            "whole_payload_budget": self.target_bytes,
             "layer_gate": self.layer_gate,
             "global_gate": self.global_gate,
             "global_mean_error": mean,
@@ -842,7 +1081,7 @@ class MixedPlanner:
             "compression_target_bpp": self.compression_target_bpp,
             "max_bf16_fraction": self.max_bf16_fraction,
             "execution": {
-                d.name: dataclasses.asdict(self.execution_contract(d, d.format))
+                d.name: dataclasses.asdict(self.execution_contract(d, d.encoding_format))
                 for d in self._targeted if d.kind == DecisionKind.QUANTIZE
             },
             "calibration_coverage": {

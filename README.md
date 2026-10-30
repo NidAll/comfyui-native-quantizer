@@ -85,6 +85,11 @@ weights, format and objective; reconstruction MSE does not establish image quali
 See [MSE optimization](docs/mse-optimization.md) for controls, calibration,
 benchmarks and numerical limits.
 
+For measured W4A8/W6A8 precision exchanges, held-out calibration, optional
+W6/INT8 quality references and whole-file compression limits, see
+[adaptive mixed precision](docs/adaptive-mixed.md). The adaptive profile is
+opt-in; its calibration gates do not establish near-lossless model quality.
+
 ## Formats
 
 | Format | Stored weights and execution request |
@@ -94,7 +99,7 @@ benchmarks and numerical limits.
 | `int4-convrot` | Packed INT4 with ConvRot and an INT4 execution request |
 | `w4a8` | Codebook INT4 with FP8 group scales and FP32 channel scales; INT8 decode grid |
 | `w6a8` | Uniform six-bit weights with FP8 group scales and FP32 channel scales; INT8 decode grid |
-| `mixed` | Per-layer W4A4/W4A8/INT8; W6A8 added with `--enable-w6a8` |
+| `mixed` | Per-layer W4A4/W4A8/INT8; optional W6A8 and INT8 ConvRot candidates |
 | `fp8-e4m3`, `fp8-e5m2` | FP8 with one FP32 tensor scale |
 | `nvfp4` | E2M1 values, E4M3 block scales and an FP32 tensor scale |
 | `mxfp8` | E4M3 values and E8M0 block scales |
@@ -175,7 +180,8 @@ implementation lives in `native_quantizer/`; dependencies are declared in
 - [MSE objectives and benchmarks](docs/mse-optimization.md)
 - [Mixed precision, calibration and runtime costs](docs/kitchen-pipeline.md)
 - [Flux 3 Klein](docs/models/flux3-klein.md), [Iris](docs/models/iris.md), [Kandinsky 6](docs/models/kandinsky6.md),
-  [Ming-Image](docs/models/ming-image.md), [Qwen-Image 2.1](docs/models/qwen-image-2.1.md)
+  [Ming-Image](docs/models/ming-image.md), [Qwen-Image 2.1](docs/models/qwen-image-2.1.md),
+  [MiniCPM-V 4.7 1B](docs/models/minicpm-v47.md), [LFM3-VL-2B](docs/models/lfm3-vl-2b.md)
 - [Support](docs/support.md) and [validation](docs/release-validation.md)
 - [Contributing](CONTRIBUTING.md), [release process](docs/releasing.md) and [changelog](CHANGELOG.md)
 

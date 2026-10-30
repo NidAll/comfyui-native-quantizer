@@ -48,6 +48,22 @@ class CalibrationStats:
         }
 
 
+def split_calibration(stats: CalibrationStats):
+    """Deterministic interleaved holdout; neither subset duplicates the other."""
+    training, holdout = {}, {}
+    for name, record in stats.layers.items():
+        samples = record['samples']
+        if len(samples) < 8:
+            raise CalibrationError(f'{name}: adaptive planning needs at least 8 calibration rows')
+        index = torch.arange(len(samples))
+        for target, mask in ((training, index % 4 != 0), (holdout, index % 4 == 0)):
+            selected = samples[mask]
+            target[name] = {**record, 'samples': selected, 'rows': len(selected)}
+    return tuple(CalibrationStats(stats.source, stats.files, stats.n_samples, layers,
+                                 {**stats.provenance, 'split': split})
+                 for layers, split in ((training, 'train-3of4'), (holdout, 'holdout-1of4')))
+
+
 def _load_npz_calibration(path: str, layer_keys: set,
                           max_rows: int) -> Dict[str, torch.Tensor]:
     out = {}

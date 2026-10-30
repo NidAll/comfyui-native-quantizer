@@ -121,7 +121,8 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                                and bool(TEXT_TOKEN_EMBEDDING.search(d.name)))
             d.format = FORMAT_INT8 if token_embedding else spec.algorithm
             if spec.cli == 'int8-convrot' and not token_embedding:
-                group = reference['layers'][d.layer].get('convrot_groupsize', 1) if reference else 256
+                group = (reference['layers'][d.layer].get('convrot_groupsize', 1)
+                         if reference else (args.int8_convrot_groupsize or 256))
                 ok = m.shape[1] > 0 and m.shape[1] % group == 0
                 reason = f'INT8 ConvRot requires input width divisible by {group}; source precision retained'
             elif spec.algorithm == FORMAT_W4A4:
@@ -195,7 +196,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                             fragments: Dict[str, Any] = {}
                             fragment_meta: Dict[str, Tuple[torch.dtype, Tuple[int, ...]]] = {}
                             convrot = (_pick_w4a4_convrot_group(m.shape[1]) if layer_spec.algorithm == FORMAT_W4A4
-                                       else 256 if layer_spec.cli == 'int8-convrot' else 0)
+                                       else (args.int8_convrot_groupsize or 256) if layer_spec.cli == 'int8-convrot' else 0)
                             if reference_conf is not None:
                                 convrot = reference_conf.get('convrot_groupsize', 0)
                             scale = None

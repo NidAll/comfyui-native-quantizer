@@ -41,6 +41,9 @@ retain their necessary dequantization paths.
 
 FP8, NVFP4 and MXFP8 are explicit conversion formats. Mixed plans use the
 W4A4/W4A8/INT8 candidate set, with W6A8 enabled only by `--enable-w6a8`.
+INT8 ConvRot is available with `--enable-int8-convrot` and is included by the
+opt-in [adaptive profile](adaptive-mixed.md). Adaptive planning adds held-out
+runtime-output gates, paired precision exchanges and whole-file size limits.
 
 ## Conversion and calibration
 
@@ -93,12 +96,14 @@ produce different tensors. Replay is compared exactly with the native forward.
 These synthetic checks do not establish full-workflow quality, latency, memory,
 dynamic-shape graph safety, patching or offload behavior.
 
-Cost files are version-checked and shape-specific. Combine their `benchmarks`
-arrays to cover multiple N/K shapes, with representative M workloads. The probe
-uses BF16 activations and records workload shapes and the cost-file hash without
-device identity. Use measurements from the intended environment and workload;
-unmatched shapes use heuristics. `kitchen-costs/v2` keys grouped formats by group
-size. Files using v1 remain readable for formats other than W6A8.
+Cost files are version-checked and shape-specific. The probe emits
+`kitchen-costs/v3` with M, relative invocation weights, optional layer keys,
+group size and a private runtime fingerprint. It uses BF16 activations and
+includes BF16 baseline and rotated INT8 costs. `--workloads workloads.json`
+accepts the workload list described in the adaptive guide. Legacy v1/v2 files
+remain readable with their single-M assumption; v1 does not certify W6A8.
+Unmatched shapes use heuristics in existing profiles. Adaptive exchanges use
+matching measurements and never infer speed from bit width.
 
 Streaming serialization, independent decoding, quality gates, resume integrity
 and atomic publication apply to mixed conversion. Kernel workspaces and live

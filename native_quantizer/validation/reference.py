@@ -76,11 +76,11 @@ def reference_decode_w4a4(packed: torch.Tensor, scale: torch.Tensor,
 
 
 def reference_decode_int8(q: torch.Tensor, scale: torch.Tensor,
-                          output_dtype: torch.dtype = torch.float32) -> torch.Tensor:
+                          output_dtype: torch.dtype = torch.float32, convrot_groupsize=None) -> torch.Tensor:
     """Independent rowwise INT8 decode: q.float() * scale [N, 1]. Validation
     only (matches the eager backend broadcast exactly)."""
-    return (q.float() * scale.to(device=q.device, dtype=torch.float32).reshape(-1, 1)
-            ).to(output_dtype)
+    decoded = q.float() * scale.to(device=q.device, dtype=torch.float32).reshape(-1, 1)
+    return (_reference_rotate(decoded, convrot_groupsize) if convrot_groupsize else decoded).to(output_dtype)
 
 
 def reference_decode_w6a8(packed, s_rel, s_channel, group_size=16, convrot_groupsize=256):

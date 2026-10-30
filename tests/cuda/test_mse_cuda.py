@@ -75,6 +75,14 @@ class MSECudaTests(unittest.TestCase):
                 self.assertEqual(len(result['results']), 5)
                 self.assertTrue(all(r['native_loader'] and r['graph_replay'] for r in result['results']))
 
+    def test_rotated_int8_candidate_forward_graph_without_float_weight_fallback(self):
+        from native_quantizer.benchmark import run
+        from comfy_kitchen.tensor import TensorWiseINT8Layout
+        with patch.object(TensorWiseINT8Layout, 'dequantize', side_effect=AssertionError('float weight fallback')):
+            result = run(64, 256, 16, 3, str(comfyui_root()), formats=(('int8-convrot', 8),))
+        self.assertTrue(result['results'][0]['native_loader'])
+        self.assertTrue(result['results'][0]['graph_replay'])
+
 
 if __name__ == '__main__':
     unittest.main()

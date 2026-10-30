@@ -7,6 +7,18 @@
 - Add exact, offline Comfy-Org reference recipes with per-layer 16/64/256
   ConvRot settings, strict layout/quality gates and a metadata-only extractor.
 
+- Add the conservative MiniCPM-V 4.7 1B INT8 ConvRot recipe, complete model
+  detection and protected vision/recurrent/boundary tensors for the separate
+  ComfyUI-Anima-Prompt-Architect consumer.
+
+- Fix nondefault W6A8 group-size accounting and parameter-weighted promotions;
+  add bounded feasibility repair when greedy allocation exhausts a budget.
+- Add opt-in adaptive planning with disjoint calibration rows, per-layer p95
+  output gates, measured paired precision exchanges and W6A8/INT8 references.
+- Add whole-file compression limits, mixed INT8 ConvRot, workload-aware v3
+  costs with BF16 baselines, stratified capture and bounded encoding/codebook reuse.
+- Bind mixed resume identity to calibration, planner/cost/reference settings and
+  validate rotated INT8 independently through serialization and native forwards.
 - Add a separate experimental native Flux 3 Klein policy with complete
   shape-checked detection, fused/split QKV and step-distilled flow-map layouts.
 - Select image/reference/text/joint block linears while preserving boundary

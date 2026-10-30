@@ -171,6 +171,19 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
             minicpm_signature, ((6144, 1024), (4096, 1024), (1152, 1152), (1024, 4608)))):
         candidates.append(("minicpm_v47", list(minicpm_signature), []))
 
+    lfm3_signature = (
+        "language_model.embed_tokens.weight",
+        "language_model.layers.0.conv.in_proj.weight",
+        "language_model.layers.0.feed_forward.w1.weight",
+        "language_model.layers.2.self_attn.k_proj.weight",
+        "vision_tower.patchifier.weight",
+        "multi_modal_projector.linear_2.weight",
+    )
+    if has(*lfm3_signature) and all(model_shape(key) == shape for key, shape in zip(
+            lfm3_signature, ((128000, 2048), (6144, 2048), (7680, 2048),
+                             (512, 2048), (1024, 1536), (2048, 4096)))):
+        candidates.append(("lfm3_vl_2b", list(lfm3_signature), []))
+
     if has("vae2llm.weight"):
         candidates.append(("yue2", ["vae2llm.weight"],
                            [s for s in ("llm2vae.weight", "latent_pos_embed.pe") if has(s)]))
@@ -635,7 +648,7 @@ def detect_architecture(info: CheckpointInfo, override: Optional[str] = None,
     if best is None:
         # try generic signature matching against the registry for anything missed
         for fam in REGISTRY_ORDER:
-            if fam in {'flux3', 'iris', 'kandinsky6', 'kandinsky6_sr', 'minicpm_v47', 'fibo2', 'moss_image'}:
+            if fam in {'flux3', 'iris', 'kandinsky6', 'kandinsky6_sr', 'minicpm_v47', 'lfm3_vl_2b', 'fibo2', 'moss_image'}:
                 # These families require complete, shape-checked signatures.
                 continue
             if fam == 'pixeldit' and any_of('y_embedder.layer_pool.weight',

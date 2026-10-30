@@ -32,6 +32,7 @@ serialization and block-loading evidence does not establish generation quality.
 | Checkpoint integrity | Protected tensors, source identities, corruption, failed gates, interrupted writes and atomic publication | Full-size operational workloads |
 | Quantized formats | Synthetic encoding, packing, independent reconstruction, metadata and output verification | Every model/consumer/backend combination |
 | MSE optimization | Native-grid scoring, both objectives, baseline fallback, bounded paths, calibration and resume | Representative model calibration and output quality |
+| Adaptive mixed planning | Held-out p95 gates, W6/INT8 references, measured paired exchanges, whole-file limits and bounded reuse | Representative full-model quality and end-to-end speed |
 | Native integer runtime | Configured consumer load/save, device movement, forwards and graph probes | Dynamic model shapes, offload, LoRA and complete generation |
 | NVFP4/MXFP8 | Encoding/decoding, CPU consumer loading and FP32 CUDA encoding | Accelerated inference and full-workflow behavior |
 | Architecture policies | Independent signatures, variant separation, selection and precision guards | Real checkpoint and workflow acceptance per architecture |

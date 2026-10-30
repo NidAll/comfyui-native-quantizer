@@ -14,6 +14,7 @@ from native_quantizer.identity import (
     FORMAT_W6A8,
     FORMAT_W6A8_REVISION,
     QUANT_ALGORITHM_REVISION,
+    MIXED_PLANNER_REVISION,
     format_revision,
     get_converter_version,
 )
@@ -70,6 +71,7 @@ def _plan_hash(info: CheckpointInfo, plan: ConversionPlan, args: Any,
         "quality_gate": getattr(args, "quality_gate", None),
         "global_error_gate": getattr(args, "global_error_gate", None),
         "max_linear_bytes_per_param": getattr(args, "max_linear_bytes_per_param", None),
+        "target_compression": getattr(args, "target_compression", None),
         "max_bf16_fraction": getattr(args, "max_bf16_fraction", None),
         "w4a4_linear_dtype": getattr(args, "w4a4_linear_dtype", "int8"),
         "strip_gpu_identity": getattr(args, "strip_gpu_identity", False),
@@ -87,6 +89,7 @@ def _plan_hash(info: CheckpointInfo, plan: ConversionPlan, args: Any,
             "name": d.name, "kind": d.kind.value, "layer": d.layer,
             "group_size": d.group_size,
             "convrot_groupsize": d.convrot_groupsize,
+            "convrot": d.convrot,
             "format": d.format,
             "component": d.component,
             "out_dtype": torch_dtype_name(d.out_dtype) if d.out_dtype else None,
@@ -100,6 +103,12 @@ def _plan_hash(info: CheckpointInfo, plan: ConversionPlan, args: Any,
         options.update(w6a8_group_size=getattr(args, "w6a8_group_size", 16),
                        enable_w6a8=getattr(args, "enable_w6a8", False),
                        kitchen_version=kitchen_version(), w6a8_revision=FORMAT_W6A8_REVISION)
+    if plan.mixed_plan is not None:
+        options.update(mixed_planner_revision=MIXED_PLANNER_REVISION,
+                       mixed_objective=getattr(args, 'mixed_objective', 'kitchen'),
+                       quality_reference=getattr(args, 'quality_reference', 'none'),
+                       kernel_costs_sha256=plan.mixed_plan.get('kernel_costs_sha256'),
+                       calibration_digest=plan.mixed_plan.get('calibration_digest'))
     optimization = OptimizationConfig.from_options(args)
     if optimization.enabled:
         options['optimization'] = optimization.to_dict()

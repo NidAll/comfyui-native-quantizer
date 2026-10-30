@@ -20,10 +20,12 @@ class ConversionOptions:
     mse_steps: int = 17
     mse_iterations: int = 3
     enable_w6a8: bool = False
+    enable_int8_convrot: bool = False
     w6a8_group_size: int = 16
     profile: str = 'auto'
     kernel_costs: str | None = None
     mixed_objective: str = 'kitchen'
+    quality_reference: str = 'none'
     target_runtime: str = 'auto'
     runtime_certificate: str | None = None
     require_runtime_certificate: bool = False
@@ -31,6 +33,7 @@ class ConversionOptions:
     quality_gate: float | None = None
     global_error_gate: float | None = None
     max_linear_bytes_per_param: float | None = None
+    target_compression: float | None = None
     max_bf16_fraction: float | None = None
     w4a4_linear_dtype: str = 'int8'
     disable_w4a4: bool = False
@@ -42,6 +45,7 @@ class ConversionOptions:
     compute_dtype: str = 'auto'
     output_dtype: str = 'auto'
     group_size: int | None = None
+    int8_convrot_groupsize: int | None = None
     min_quantized_byte_fraction: float | None = None
     fail_on_low_compression: bool = False
     calibration_source: str | None = None
@@ -101,7 +105,7 @@ def validate_conversion_options(args) -> None:
     choices = {**DEFAULT_CHOICES, 'components': ('auto', 'diffusion', 'text_encoder', 'all'),
                'output_dtype': ('auto', 'fp16', 'bf16'),
                'nonfinite_policy': ('error', 'keep'), 'w4a4_linear_dtype': ('int4', 'int8'),
-               'profile': ('auto', 'balanced', 'conservative', 'size-first', 'throughput')}
+               'profile': ('auto', 'balanced', 'conservative', 'size-first', 'throughput', 'adaptive')}
     for key, values in choices.items():
         if getattr(args, key) not in values:
             raise UsageError(f'--{key.replace("_", "-")} must be one of {", ".join(values)}')
@@ -109,12 +113,37 @@ def validate_conversion_options(args) -> None:
     args.format = FORMAT_ALIASES.get(args.format, args.format)
     if getattr(args, 'reference_recipe', None) and args.format != 'int8-convrot':
         raise UsageError('--reference-recipe requires --format int8-convrot')
+    if args.int8_convrot_groupsize is not None:
+        if args.format != 'int8-convrot' or args.int8_convrot_groupsize not in (16, 64, 256):
+            raise UsageError('--int8-convrot-groupsize requires int8-convrot and size 16, 64 or 256')
+        if args.reference_recipe:
+            raise UsageError('--reference-recipe owns ConvRot group sizes')
     if args.format not in ('w4a8', 'w6a8', 'mixed') and args.format not in NATIVE_FORMATS:
         raise UsageError(f'unknown conversion format {args.format!r}')
     if args.resume and args.overwrite:
         raise UsageError("--resume and --overwrite are mutually exclusive")
     if args.enable_w6a8 and args.format != "mixed":
         raise UsageError("--enable-w6a8 requires --format mixed")
+    if args.enable_int8_convrot and args.format != 'mixed':
+        raise UsageError('--enable-int8-convrot requires --format mixed')
+    if args.target_compression is not None:
+        import math
+        if not math.isfinite(args.target_compression) or args.target_compression <= 1:
+            raise UsageError('--target-compression must be finite and greater than 1')
+        if args.format != 'mixed':
+            raise UsageError('--target-compression requires --format mixed')
+    if args.profile == 'adaptive':
+        if args.format != 'mixed' or not args.calibration_source or not args.kernel_costs:
+            raise UsageError('--profile adaptive requires mixed, --calibration-source and --kernel-costs')
+        if args.output_dtype != 'auto':
+            raise UsageError('adaptive planning preserves source precision; use --output-dtype auto')
+    if args.quality_reference not in ('none', 'w6a8', 'int8'):
+        raise UsageError('--quality-reference must be none, w6a8 or int8')
+    if args.quality_reference != 'none':
+        if args.profile != 'adaptive':
+            raise UsageError('--quality-reference requires --profile adaptive')
+        if args.quality_reference == 'w6a8' and not args.enable_w6a8:
+            raise UsageError('--quality-reference w6a8 requires --enable-w6a8')
     if args.w6a8_group_size <= 0 or args.w6a8_group_size % 16:
         raise UsageError("--w6a8-group-size must be a positive multiple of 16")
     if args.group_size is not None and args.group_size != 16:

@@ -1,0 +1,203 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      background: #0b1218;
+      font-family: var(--font-mono, "JetBrains Mono");
+      overflow: hidden;
+    }
+    #s3-stage {
+      position: absolute;
+      inset: 0;
+    }
+    .s3-mark {
+      position: absolute;
+      left: 120px;
+      top: 96px;
+      font-size: 17px;
+      letter-spacing: 0.34em;
+      text-transform: uppercase;
+      color: #7d95a0;
+    }
+    .s3-index {
+      position: absolute;
+      right: 120px;
+      top: 96px;
+      font-size: 17px;
+      letter-spacing: 0.24em;
+      color: #55707c;
+    }
+    .s3-num {
+      position: absolute;
+      top: 132px;
+      font-family: var(--font-display, "Oswald");
+      font-weight: 700;
+      font-size: 258px;
+      line-height: 1;
+      letter-spacing: -0.02em;
+      transform-origin: left bottom;
+    }
+    #s3-n196 {
+      left: 116px;
+      color: #8be9e8;
+    }
+    #s3-n114 {
+      left: 512px;
+      color: #b9ccd4;
+    }
+    .s3-cap {
+      position: absolute;
+      top: 418px;
+      font-size: 28px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+    #s3-c196 {
+      left: 122px;
+      color: #8be9e8;
+    }
+    #s3-c114 {
+      left: 518px;
+      color: #8fa6b0;
+    }
+    #s3-eq {
+      position: absolute;
+      left: 122px;
+      top: 484px;
+      font-size: 28px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #6f8892;
+    }
+    .s3-fam {
+      position: absolute;
+      left: 120px;
+      width: 700px;
+      height: 74px;
+      border-top: 1px solid #22343d;
+      font-family: var(--font-display, "Oswald");
+      font-weight: 500;
+      font-size: 36px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #d9e7ec;
+      padding-top: 16px;
+    }
+    .s3-fam .tag {
+      position: absolute;
+      right: 0;
+      top: 26px;
+      font-family: var(--font-mono, "JetBrains Mono");
+      font-size: 14px;
+      letter-spacing: 0.16em;
+      color: #6f8892;
+    }
+    #s3-fam-title {
+      position: absolute;
+      left: 120px;
+      top: 556px;
+      font-size: 28px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #7d95a0;
+    }
+    #s3-panel-wrap {
+      position: absolute;
+      left: 880px;
+      top: 262px;
+      width: 940px;
+      height: 440px;
+      border: 1px solid #2b4b57;
+      background: #101a22;
+      overflow: hidden;
+      opacity: 0;
+    }
+    #s3-panel-wrap img {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 940px;
+      height: 440px;
+      object-fit: cover;
+    }
+    #s3-panel-label {
+      position: absolute;
+      left: 880px;
+      top: 208px;
+      font-size: 28px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #7d95a0;
+      opacity: 0;
+    }
+    #s3-panel-cap {
+      position: absolute;
+      left: 880px;
+      top: 742px;
+      width: 940px;
+      font-size: 17px;
+      line-height: 1.6;
+      letter-spacing: 0.04em;
+      color: #7d95a0;
+      opacity: 0;
+    }
+    #s3-panel-cap b {
+      color: #d9e7ec;
+      font-weight: 500;
+    }
+  </style>
+  <div data-hf-id="hf-eqxv" id="root" data-composition-id="s3-plan" data-width="1920" data-height="1080">
+    <div data-hf-id="hf-kp21" id="s3-stage" class="clip" data-start="0" data-duration="5.46" data-track-index="1">
+      <div data-hf-id="hf-6ndw" class="s3-mark" data-layout-ignore>quantizer // studio</div>
+      <div data-hf-id="hf-btxl" class="s3-index" data-layout-ignore>03 / 07</div>
+
+      <div data-hf-id="hf-cixo" class="s3-num" id="s3-n196">196</div>
+      <div data-hf-id="hf-6gmg" class="s3-num" id="s3-n114">114</div>
+      <div data-hf-id="hf-ognk" class="s3-cap" id="s3-c196">quantized</div>
+      <div data-hf-id="hf-eh9v" class="s3-cap" id="s3-c114">preserved</div>
+      <div data-hf-id="hf-li7d" id="s3-eq">310 decisions</div>
+
+      <div data-hf-id="hf-7wir" id="s3-fam-title">kept at source precision</div>
+      <div data-hf-id="hf-8mbm" class="s3-fam" id="s3-f0" style="top: 604px">norms<span data-hf-id="hf-3qer" class="tag" data-layout-ignore>q_norm · k_norm</span></div>
+      <div data-hf-id="hf-uy7z" class="s3-fam" id="s3-f1" style="top: 678px">modulation<span data-hf-id="hf-p1js" class="tag" data-layout-ignore>adaLN</span></div>
+      <div data-hf-id="hf-96zf" class="s3-fam" id="s3-f2" style="top: 752px">embeddings<span data-hf-id="hf-fpti" class="tag" data-layout-ignore>embed_tokens</span></div>
+      <div data-hf-id="hf-8lmg" class="s3-fam" id="s3-f3" style="top: 826px">input / output boundaries<span data-hf-id="hf-8mvo" class="tag" data-layout-ignore>passthrough</span></div>
+
+      <div data-hf-id="hf-0un5" id="s3-panel-label">before anything is written</div>
+      <div data-hf-id="hf-29vv" id="s3-panel-wrap"><img data-hf-id="hf-4ezd" data-duration="5.46" src="assets/img/layer-plan.png" alt="Quantizer Studio layer plan showing 196 quantized and 114 preserved tensors" /></div>
+    </div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo(
+      "#s3-n196",
+      { opacity: 0, scale: 1.14, filter: "blur(18px)" },
+      { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.4, ease: "power4.out" },
+      0,
+    );
+    tl.fromTo(
+      "#s3-n114",
+      { opacity: 0, scale: 1.14, filter: "blur(18px)" },
+      { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.4, ease: "power4.out" },
+      0.12,
+    );
+    tl.fromTo("#s3-c196", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.24, ease: "power2.out" }, 0.24);
+    tl.fromTo("#s3-c114", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.24, ease: "power2.out" }, 0.32);
+    tl.fromTo("#s3-eq", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.5);
+    tl.fromTo("#s3-fam-title", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 2.42);
+    tl.fromTo("#s3-f0", { opacity: 0, x: -14 }, { opacity: 1, x: 0, duration: 0.24, ease: "power3.out" }, 2.725); // beat 11.465
+    tl.fromTo("#s3-f1", { opacity: 0, x: -14 }, { opacity: 1, x: 0, duration: 0.24, ease: "power3.out" }, 3.275); // beat 12.015
+    tl.fromTo("#s3-f2", { opacity: 0, x: -14 }, { opacity: 1, x: 0, duration: 0.24, ease: "power3.out" }, 3.815); // beat 12.555
+    tl.fromTo("#s3-f3", { opacity: 0, x: -14 }, { opacity: 1, x: 0, duration: 0.24, ease: "power3.out" }, 4.365); // beat 13.105
+
+    tl.fromTo("#s3-panel-label", { opacity: 0 }, { opacity: 1, duration: 0.24 }, 0.95);
+    tl.fromTo(
+      "#s3-panel-wrap",
+      { opacity: 0, y: 26 },
+      { opacity: 1, y: 0, duration: 0.44, ease: "power4.out" },
+      0.98,
+    );
+    window.__timelines["s3-plan"] = tl;
+  </script>
+</template>
