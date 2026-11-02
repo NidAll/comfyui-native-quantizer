@@ -68,6 +68,13 @@ Python integrations use `native_quantizer.api`.
 
 ## Execution contracts
 
+`application.run_conversion` is a short sequence of phase functions (source
+inspection, detection, format checks, output-path preparation, planning,
+engine execution, validation and publication) sharing one request context.
+`execution.native.convert_native` follows the same shape, with per-layer
+encoding and quality gating in their own functions. Phases keep the original
+statement order, so safety checks still run before any work they protect.
+
 W4A8, W6A8 and mixed conversions use a planned, resumable engine. Resume requires
 matching source identities, options, layouts and staged data. MSE identities also
 include the optimizer revision and selected activation contents.

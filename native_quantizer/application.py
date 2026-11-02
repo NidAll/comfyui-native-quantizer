@@ -11,7 +11,7 @@ import stat
 import time
 import torch
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from native_quantizer import events
 from native_quantizer.events import prepare_event_stream
@@ -71,7 +71,7 @@ from native_quantizer.metadata import (
     build_quant_metadata,
     serialized_quant_metadata,
 )
-from native_quantizer.options import ConversionOptions
+from native_quantizer.options import ConversionOptions, low_compression_threshold
 from native_quantizer.optimization import (OptimizationConfig, calibration_digest,
                                           check_optimization_calibration, read_optimization_metadata)
 from native_quantizer.planning.classification import _emit_plan_layers, classify_tensors
@@ -216,6 +216,57 @@ def _planned_format(name: str, argument_error: Callable[[str], None]) -> Optiona
     return fmt
 
 
+@dataclasses.dataclass
+class _Conversion:
+    """Request state shared by the phases of one planned conversion."""
+    args: Any
+    env: EnvironmentInfo
+    info: CheckpointInfo
+    detection: DetectionResult
+    optimization: OptimizationConfig
+    argument_error: Callable[[str], None]
+    started: float
+    warnings: List[str]
+
+    def write_report(self, plan: ConversionPlan, calibration: Any, metrics: Any,
+                     summary: Any, input_hashes: Any, output_sha: str,
+                     quant_rows: List[str]) -> None:
+        report = build_report(self.info, plan, self.env, self.args, self.detection,
+                              calibration, metrics, summary, input_hashes, output_sha,
+                              time.time() - self.started, self.warnings, quant_rows)
+        _write_reports(self.args, report)
+
+
+@dataclasses.dataclass
+class _OutputPaths:
+    """Requested output and its private siblings, checked before any work."""
+    final: str
+    tmp: str
+    staged: str
+    validation: str
+    state: str
+    expected_identity: Optional[Tuple[int, int]]
+
+    def remove_temporaries(self) -> None:
+        for path in (self.tmp, self.validation, self.staged, self.state):
+            if os.path.exists(path):
+                _remove_temp_path(path)
+
+
+@dataclasses.dataclass
+class _PlannedConversion:
+    plan: ConversionPlan
+    calibration: Any
+    sensitivity: Optional[SensitivityAnalyzer]
+    quant_rows: List[str]
+    comp_stats: Dict[str, Any]
+    group_size: int
+
+    @property
+    def metrics(self) -> Dict[str, Any]:
+        return self.sensitivity.results if self.sensitivity else {}
+
+
 def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
                    argument_error: Optional[Callable[[str], None]] = None) -> int:
     args = dataclasses.replace(options)
@@ -223,8 +274,42 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     if argument_error is None:
         def argument_error(message: str) -> None:
             raise UsageError(message)
-    t_start = time.time()
+    started = time.time()
     warnings: List[str] = []
+    _normalize_numeric_options(args)
+    info = _inspect_source(args, warnings)
+    detection = _detect(args, info, warnings)
+    if args.inspect:
+        _print_inspection(info, detection)
+        return 0
+    _check_format_options(args, detection)
+    if args.format in NATIVE_FORMATS:
+        if detection.classifier_info.get("variant") == "design-layer" and not args.dry_run:
+            log().warning(detection.warnings[-1])
+        return convert_native(info, detection, args)
+    if args.full_precision_matmul:
+        raise UsageError('--full-precision-matmul is available for explicit native formats only')
+    run = _Conversion(args, env, info, detection, optimization, argument_error, started, warnings)
+    if args.validation_only:
+        return _validate_existing_output(run)
+
+    fmt = _planned_format(args.format, argument_error)
+    effective_runtime = _resolve_planned_runtime(run, fmt)
+    if args.output is None:
+        argument_error("--output is required")
+    paths = _prepare_output_paths(args, info)
+    planned = _plan_conversion(run, fmt, effective_runtime)
+    if args.metadata_only:
+        return _write_metadata_only(run, planned)
+    if args.dry_run:
+        return _print_dry_run(run, planned, paths)
+    input_hashes = _run_engine(run, planned.plan, paths)
+    return _validate_and_publish(run, planned, paths, input_hashes)
+
+
+# ---- request and source phases ----
+
+def _normalize_numeric_options(args: Any) -> None:
     if isinstance(args.max_memory, str):
         args.max_memory = parse_size(args.max_memory)
     if args.max_memory <= 0:
@@ -251,6 +336,9 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         if value is not None and (not math.isfinite(value)
                                   or not 0.0 <= value <= 1.0):
             raise UsageError(f"{option} must be a finite number in [0, 1]")
+
+
+def _inspect_source(args: Any, warnings: List[str]) -> CheckpointInfo:
     # Events stay disabled until prepare_event_stream knows the source shards.
     info = discover_checkpoint(args.model, trust_pickle=args.trust_pickle,
                                allow_extra_shard_tensors=
@@ -269,13 +357,15 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     if info.kind == "pickle":
         warnings.append("pickle input loaded fully into RAM (streaming not possible); "
                         "only convert checkpoints you trust")
-
     if info.is_quantized_input and not (args.inspect or args.validation_only):
         raise InputError(
             "input checkpoint already contains quantization markers "
             f"('{METADATA_KEY_QUANT}' metadata or '{LAYER_CONF_KEY}' tensors); "
             "refusing to re-quantize. Use --inspect to review it.")
+    return info
 
+
+def _detect(args: Any, info: CheckpointInfo, warnings: List[str]) -> DetectionResult:
     def _shape_lookup(name: str) -> Optional[Tuple[int, ...]]:
         m = info.by_name(name)
         return tuple(m.shape) if m is not None else None
@@ -298,38 +388,41 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             raise
 
     events.emit("detection", architecture=detection.architecture,
-                       confidence=detection.confidence,
-                       variant=detection.classifier_info.get("variant"),
-                       component=detection.policy.component,
-                       warnings=detection.warnings)
+                confidence=detection.confidence,
+                variant=detection.classifier_info.get("variant"),
+                component=detection.policy.component,
+                warnings=detection.warnings)
+    return detection
 
-    if args.inspect:
-        print("=" * 70)
-        print("input checkpoint inspection")
-        print("=" * 70)
-        print(f"kind            : {info.kind}")
-        print(f"files           : {info.files}")
-        print(f"tensors         : {len(info.tensors)}  ({human_bytes(info.total_bytes)})")
-        print(f"metadata keys   : {sorted(info.metadata.keys())}")
-        print(f"config.json     : {'present' if info.config else 'absent'}")
-        print(f"quantized input : {info.is_quantized_input}")
-        print(f"detected arch   : {detection.architecture} (confidence {detection.confidence})")
-        if detection.classifier_info.get("variant"):
-            print(f"model variant   : {detection.classifier_info['variant']}")
-        print(f"component       : {detection.policy.component}")
-        print(f"unet prefix     : {detection.unet_prefix!r}")
-        print("evidence        : " + "; ".join(detection.evidence or ["-"]))
-        print("hints           : " + "; ".join(detection.hints or ["-"]))
-        print("competing       : " + "; ".join(detection.competing or ["-"]))
-        print("policy          : " + detection.policy.family)
-        print()
-        print("first 40 tensors:")
-        for t in info.tensors[:40]:
-            print(f"  {t.name:70s} {t.dtype} {tuple(t.shape)}")
-        if len(info.tensors) > 40:
-            print(f"  ... {len(info.tensors) - 40} more")
-        return 0
 
+def _print_inspection(info: CheckpointInfo, detection: DetectionResult) -> None:
+    print("=" * 70)
+    print("input checkpoint inspection")
+    print("=" * 70)
+    print(f"kind            : {info.kind}")
+    print(f"files           : {info.files}")
+    print(f"tensors         : {len(info.tensors)}  ({human_bytes(info.total_bytes)})")
+    print(f"metadata keys   : {sorted(info.metadata.keys())}")
+    print(f"config.json     : {'present' if info.config else 'absent'}")
+    print(f"quantized input : {info.is_quantized_input}")
+    print(f"detected arch   : {detection.architecture} (confidence {detection.confidence})")
+    if detection.classifier_info.get("variant"):
+        print(f"model variant   : {detection.classifier_info['variant']}")
+    print(f"component       : {detection.policy.component}")
+    print(f"unet prefix     : {detection.unet_prefix!r}")
+    print("evidence        : " + "; ".join(detection.evidence or ["-"]))
+    print("hints           : " + "; ".join(detection.hints or ["-"]))
+    print("competing       : " + "; ".join(detection.competing or ["-"]))
+    print("policy          : " + detection.policy.family)
+    print()
+    print("first 40 tensors:")
+    for t in info.tensors[:40]:
+        print(f"  {t.name:70s} {t.dtype} {tuple(t.shape)}")
+    if len(info.tensors) > 40:
+        print(f"  ... {len(info.tensors) - 40} more")
+
+
+def _check_format_options(args: Any, detection: DetectionResult) -> None:
     if detection.policy.runtime_status == "unsupported" and args.architecture in (None, "auto"):
         raise UnsupportedArchitectureError(
             f"architecture {detection.architecture!r} has no ComfyUI quantized-loading "
@@ -347,51 +440,45 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         raise UsageError('--reference-recipe requires --format int8-convrot')
     if args.kernel_costs and args.format != "mixed":
         raise UsageError("--kernel-costs requires --format mixed")
-    if args.format in NATIVE_FORMATS:
-        if detection.classifier_info.get("variant") == "design-layer" and not args.dry_run:
-            log().warning(detection.warnings[-1])
-        return convert_native(info, detection, args)
-    if args.full_precision_matmul:
-        raise UsageError('--full-precision-matmul is available for explicit native formats only')
-    if args.validation_only:
-        if not args.output or not os.path.exists(args.output):
-            argument_error("--validation-only requires an existing --output file")
-        fmt = _planned_format(args.format, argument_error)
-        plan = plan_from_output(args.output, detection, fmt, info)
-        with RawSafetensorsFile(args.output) as raw:
-            record = json.loads(raw.metadata.get(METADATA_KEY_EXT, '{}')).get('optimization')
-        stored = read_optimization_metadata(record)
-        args.optimizer, args.mse_objective = stored.mode, stored.objective
-        args.mse_steps, args.mse_iterations = stored.steps, stored.iterations
-        validator = Validator(info, plan, args.output, args, env)
-        validation_input_hashes = hash_checkpoint_files(info)
-        with CheckpointReader(info) as validation_reader:
-            summary = validator.run(reader=validation_reader,
-                                    input_hashes=validation_input_hashes)
-        quant_rows = []
-        for decision in plan.quantized_layers():
-            tensor = info.by_name(decision.name)
-            shape = tuple(tensor.shape) if tensor is not None else "missing"
-            quant_rows.append(
-                f"{decision.layer}: {shape} gs={decision.group_size} "
-                f"cgs={decision.convrot_groupsize} "
-                f"fmt={decision.format}")
-        report = build_report(info, plan, env, args, detection, None, {},
-                              summary, validation_input_hashes,
-                              summary.get("output_sha256", ""),
-                              time.time() - t_start, warnings, quant_rows)
-        _write_reports(args, report)
-        return 0 if summary["n_failed"] == 0 else 2
 
-    fmt = _planned_format(args.format, argument_error)
 
+def _validate_existing_output(run: _Conversion) -> int:
+    args, info = run.args, run.info
+    if not args.output or not os.path.exists(args.output):
+        run.argument_error("--validation-only requires an existing --output file")
+    fmt = _planned_format(args.format, run.argument_error)
+    plan = plan_from_output(args.output, run.detection, fmt, info)
+    with RawSafetensorsFile(args.output) as raw:
+        record = json.loads(raw.metadata.get(METADATA_KEY_EXT, '{}')).get('optimization')
+    stored = read_optimization_metadata(record)
+    args.optimizer, args.mse_objective = stored.mode, stored.objective
+    args.mse_steps, args.mse_iterations = stored.steps, stored.iterations
+    validator = Validator(info, plan, args.output, args, run.env)
+    validation_input_hashes = hash_checkpoint_files(info)
+    with CheckpointReader(info) as validation_reader:
+        summary = validator.run(reader=validation_reader,
+                                input_hashes=validation_input_hashes)
+    quant_rows = []
+    for decision in plan.quantized_layers():
+        tensor = info.by_name(decision.name)
+        shape = tuple(tensor.shape) if tensor is not None else "missing"
+        quant_rows.append(
+            f"{decision.layer}: {shape} gs={decision.group_size} "
+            f"cgs={decision.convrot_groupsize} "
+            f"fmt={decision.format}")
+    run.write_report(plan, None, {}, summary, validation_input_hashes,
+                     summary.get("output_sha256", ""), quant_rows)
+    return 0 if summary["n_failed"] == 0 else 2
+
+
+def _resolve_planned_runtime(run: _Conversion, fmt: str) -> str:
+    args, env = run.args, run.env
     if fmt == FORMAT_W6A8 or args.enable_w6a8:
         require_w6a8_api()
         if env.has_comfy_quant_ops and FORMAT_W6A8 not in env.comfyui_quant_algos:
             raise RuntimeCompatibilityError("W6A8 requires ComfyUI >= 0.38.0; installed quant_ops does not register w6a8_int8")
         if args.require_calibration and not args.calibration_source:
             raise CalibrationError("--require-calibration needs --calibration-source")
-    # ---- mixed-mode runtime + profile resolution (auto) ----
     # Auto detects the GPU (NVIDIA CUDA, AMD ROCm, or CPU) and picks the
     # balanced profile on an accelerator, conservative on CPU.  The detected
     # architecture is already known here; a calibration-free balanced run is
@@ -410,11 +497,11 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         profile_name = args.profile
         if profile_name == "auto":
             profile_name = "balanced" if effective_runtime != "cpu" else "conservative"
-            warnings.append(
+            run.warnings.append(
                 f"auto profile: {profile_name} for target runtime "
                 f"{effective_runtime} (set --profile to override)")
         if args.require_calibration and not args.calibration_source:
-            argument_error("--require-calibration needs --calibration-source")
+            run.argument_error("--require-calibration needs --calibration-source")
         disabled_formats = []
         if args.disable_w4a4:
             disabled_formats.append(FORMAT_W4A4)
@@ -423,20 +510,19 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         if args.disable_int8:
             disabled_formats.append(FORMAT_INT8)
         if len(disabled_formats) == 3 and not args.enable_w6a8:
-            argument_error("at least one quantized format must stay enabled in mixed mode")
+            run.argument_error("at least one quantized format must stay enabled in mixed mode")
         if effective_runtime == "cpu":
-            warnings.append(
+            run.warnings.append(
                 "W4A4 linear_dtype note: the comfy-kitchen eager backend "
                 "accepts int4/int8 but always executes the int4 activation "
                 "path; linear_dtype=int8 only changes the CUDA kernels")
         args._mixed_profile_name = profile_name
         args._mixed_disabled_formats = disabled_formats
         args._effective_runtime = effective_runtime
+    return effective_runtime
 
-    if args.output is None:
-        argument_error("--output is required")
 
-    # ---- output path safety ----
+def _prepare_output_paths(args: Any, info: CheckpointInfo) -> _OutputPaths:
     out_path = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     if os.path.isdir(out_path):
@@ -460,14 +546,13 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             raise OutputError(
                 f"output path is a symlink: {out_path}; refusing --overwrite")
         expected_dest_identity = (int(lst.st_dev), int(lst.st_ino))
-    tmp_path = out_path + ".tmp"
-    staged_path = out_path + ".staged"
-    validation_path = out_path + ".validation"
-    state_path = out_path + ".state.json"
-    if os.path.exists(tmp_path) and not args.overwrite and not args.resume:
-        raise OutputError(f"temp output already exists: {tmp_path} (use --overwrite or --resume)")
-    for label, internal_path in (("staged output", staged_path),
-                                 ("validation output", validation_path)):
+    paths = _OutputPaths(out_path, out_path + ".tmp", out_path + ".staged",
+                         out_path + ".validation", out_path + ".state.json",
+                         expected_dest_identity)
+    if os.path.exists(paths.tmp) and not args.overwrite and not args.resume:
+        raise OutputError(f"temp output already exists: {paths.tmp} (use --overwrite or --resume)")
+    for label, internal_path in (("staged output", paths.staged),
+                                 ("validation output", paths.validation)):
         if not os.path.exists(internal_path):
             continue
         if args.overwrite:
@@ -475,45 +560,28 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         elif args.resume:
             # A validation copy is never resume authority.  A staged output is
             # trusted only together with its checksummed state file.
-            if internal_path == validation_path or not os.path.exists(state_path):
+            if internal_path == paths.validation or not os.path.exists(paths.state):
                 _remove_temp_path(internal_path)
         else:
             raise OutputError(
                 f"{label} already exists: {internal_path} "
                 "(use --overwrite or --resume)")
+    return paths
 
-    # ---- planning ----
+
+# ---- planning phases ----
+
+def _plan_conversion(run: _Conversion, fmt: str, effective_runtime: str) -> _PlannedConversion:
+    args, info = run.args, run.info
     compute_dtype = {"auto": torch.float32, "fp32": torch.float32,
                      "fp16": torch.float16, "bf16": torch.bfloat16}[args.compute_dtype]
     args._compute_dtype_tensor = compute_dtype
     out_dtype = {"auto": None, "fp16": torch.float16, "bf16": torch.bfloat16}[args.output_dtype]
     events.emit("phase", phase="planning")
-    decisions = classify_tensors(info, detection, fmt, args.w6a8_group_size if fmt == FORMAT_W6A8 else args.group_size,
+    decisions = classify_tensors(info, run.detection, fmt, args.w6a8_group_size if fmt == FORMAT_W6A8 else args.group_size,
                                  args.include, args.exclude, args.keep_precision,
                                  out_dtype, None, components=args.components,
                                  quantize_text_embeddings=args.quantize_text_embeddings)
-    # ``keep`` must scan before inventory planning because it changes tensor
-    # layouts. A W4A8 sensitivity prepass also benefits from early rejection.
-    # The common error-only conversion path relies on the quantizers' fused
-    # amax/finite checks, avoiding a redundant full read of every large layer.
-    early_nonfinite_check = (
-        args.nonfinite_policy == "keep"
-        or (fmt in GROUPED_INT8_FORMATS
-            and (args.sensitivity_threshold is not None
-                 or args.error_threshold is not None
-                 or args.calibration_source is not None))
-    )
-    nonfinite_kept = (apply_nonfinite_policy(
-        info, decisions, args.nonfinite_policy) if early_nonfinite_check else [])
-    if nonfinite_kept:
-        warnings.append(
-            f"nonfinite policy keep: {len(nonfinite_kept)} layer(s) with NaN/Inf "
-            "passed through at original precision: " +
-            "; ".join(nonfinite_kept[:3]) +
-            (" ..." if len(nonfinite_kept) > 3 else ""))
-
-    effective_device, effective_backend = conversion_device(args.device)
-
     # Sensitivity / mixed planning is a planning operation.  It must be
     # complete before output shapes and offsets are frozen.
     needs_sensitivity_prepass = (
@@ -522,171 +590,222 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
              or args.error_threshold is not None
              or args.calibration_source is not None)
     )
+    # ``keep`` must scan before inventory planning because it changes tensor
+    # layouts. A W4A8 sensitivity prepass also benefits from early rejection.
+    # The common error-only conversion path relies on the quantizers' fused
+    # amax/finite checks, avoiding a redundant full read of every large layer.
+    if args.nonfinite_policy == "keep" or needs_sensitivity_prepass:
+        nonfinite_kept = apply_nonfinite_policy(info, decisions, args.nonfinite_policy)
+        if nonfinite_kept:
+            run.warnings.append(
+                f"nonfinite policy keep: {len(nonfinite_kept)} layer(s) with NaN/Inf "
+                "passed through at original precision: " +
+                "; ".join(nonfinite_kept[:3]) +
+                (" ..." if len(nonfinite_kept) > 3 else ""))
+
+    effective_device, effective_backend = conversion_device(args.device)
     prepass_source_hashes = (
         hash_checkpoint_files(info, refresh=True)
         if needs_sensitivity_prepass else None
     )
+    calibration = _load_planning_calibration(run, decisions)
+    if fmt == FORMAT_W6A8:
+        _check_w6a8_planning(run, decisions, calibration, effective_runtime)
+    sensitivity = None
+    mixed_planner = None
+    if fmt == FORMAT_MIXED:
+        mixed_planner = _plan_mixed(run, decisions, calibration, effective_runtime,
+                                    effective_device, compute_dtype)
+    elif needs_sensitivity_prepass:
+        sensitivity = _run_sensitivity_prepass(run, decisions, calibration, effective_device,
+                                               compute_dtype, prepass_source_hashes)
+    plan = _build_plan(run, fmt, decisions, mixed_planner, effective_backend, out_dtype)
+    quant_rows, comp_stats, group_size = _check_plan(run, plan)
+    return _PlannedConversion(plan, calibration, sensitivity, quant_rows, comp_stats, group_size)
+
+
+def _load_planning_calibration(run: _Conversion, decisions: List[TensorDecision]) -> Any:
+    args, optimization = run.args, run.optimization
     calibration = None
     if args.calibration_source:
         events.emit("phase", phase="calibration")
-        calibration = load_calibration(args.calibration_source, info,
+        calibration = load_calibration(args.calibration_source, run.info,
                                        args.calibration_samples, args.calibration_cache,
                                        args.max_memory)
     if optimization.enabled:
         check_optimization_calibration(optimization, calibration, decisions, args.require_calibration)
         args._optimization_calibration = calibration
         args._optimization_calibration_digest = calibration_digest(calibration)
-    if fmt == FORMAT_W6A8:
-        if args.require_calibration:
-            missing = [d.name for d in decisions if d.kind == DecisionKind.QUANTIZE
-                       and (calibration is None or not any(key in calibration.layers for key in (d.name, d.layer)))]
-            if missing:
-                raise CalibrationError("calibration missing for targeted W6A8 layers: " + ", ".join(missing[:5]))
-        if args.require_runtime_certificate and not args.runtime_certificate:
-            raise RuntimeCompatibilityError("--require-runtime-certificate needs --runtime-certificate")
-        if args.runtime_certificate:
-            _check_runtime_certificate(load_runtime_certificate(args.runtime_certificate),
-                runtime_capabilities_for(effective_runtime, env), [FORMAT_W6A8])
-    sensitivity = None
-    mixed_planner = None
-    if fmt == FORMAT_MIXED:
-        events.emit("phase", phase="mixed_analysis")
-        profile_name = getattr(args, "_mixed_profile_name", "balanced")
-        layer_gate = args.quality_gate
-        if layer_gate is None and args.error_threshold is not None:
-            layer_gate = args.error_threshold
-        runtime_caps = runtime_capabilities_for(effective_runtime, env)
-        certificate = None
-        if args.runtime_certificate:
-            certificate = load_runtime_certificate(args.runtime_certificate)
-            warnings.append(
-                f"runtime certificate loaded: backend={certificate.backend}, "
-                f"gpu={certificate.gpu or 'unknown'}, formats="
-                f"{sorted(certificate.formats)}")
-            # Apply the certificate to the capabilities BEFORE planning: the
-            # planner, its summary and the extension metadata must all observe
-            # one final authoritative RuntimeCapabilities (never mutated after
-            # planning). Coverage of the actually selected formats is still
-            # enforced after planning, when the selection is known.
-            _check_runtime_certificate(certificate, runtime_caps, [])
-            cap_map = {FORMAT_W4A4: ("w4a4", runtime_caps.w4a4),
-                       FORMAT_W4A8: ("w4a8", runtime_caps.w4a8),
-                       FORMAT_INT8: ("int8", runtime_caps.int8),
-                       FORMAT_W6A8: ("w6a8", runtime_caps.w6a8)}
-            certed = {
-                field: dataclasses.replace(cap, certified=True)
-                for fmt, (field, cap) in cap_map.items()
-                if fmt in certificate.formats}
-            runtime_caps = dataclasses.replace(
-                runtime_caps, runtime_certified=True, **certed)
-        costs, workloads = {}, []
-        if args.kernel_costs:
-            if effective_runtime != "nvidia":
-                raise UsageError("--kernel-costs currently requires --target-runtime nvidia")
-            try:
-                costs, workloads = load_kernel_costs(args.kernel_costs, env.comfy_kitchen_rev)
-            except (ValueError, KeyError, TypeError, OSError) as exc:
-                raise UsageError(f"invalid --kernel-costs: {exc}") from exc
-        mixed_planner = MixedPlanner(
-            profile_name, calibration, args.max_memory, effective_device,
-            compute_dtype,
-            disabled_formats=getattr(args, "_mixed_disabled_formats", ()),
-            layer_gate=layer_gate,
-            global_gate=args.global_error_gate,
-            runtime=runtime_caps,
-            compression_target_bpp=args.max_linear_bytes_per_param,
-            max_bf16_fraction=args.max_bf16_fraction,
-            linear_dtype=args.w4a4_linear_dtype,
-            runtime_certificate=certificate,
-            seed=args.seed,
-            codebook_mode=args.codebook_mode,
-            objective=args.mixed_objective, kernel_costs=costs,
-            enable_w6a8=args.enable_w6a8, w6a8_group_size=args.w6a8_group_size,
-            optimization=optimization, workloads=workloads,
-            target_bytes=(args._max_output_bytes - 16384 - sum(len(t.name.encode()) * 4 + 512 for t in info.tensors)
-                          - len(json_dumps(info.metadata).encode()) if args._max_output_bytes is not None else None),
-            enable_int8_convrot=getattr(args, 'enable_int8_convrot', False),
-            quality_reference=getattr(args, 'quality_reference', 'none'))
-        if args.require_runtime_certificate and certificate is None:
-            raise RuntimeCompatibilityError(
-                "--require-runtime-certificate needs --runtime-certificate "
-                "(supply a certificate from real native execution on the "
-                "target inference machine)")
-        if args.require_calibration or profile_name == 'adaptive':
-            missing = [d.name for d in decisions if d.kind == DecisionKind.QUANTIZE
-                       and mixed_planner._activations(d.name) is None]
-            if missing:
-                raise CalibrationError(
-                    f"calibration missing for {len(missing)} targeted layers: " + ", ".join(missing[:5]))
-        if profile_name == 'adaptive':
-            if not any(len(key) == 7 for key in costs):
-                raise UsageError('adaptive planning requires workload-aware kitchen-costs/v3 measurements')
-            train_calibration, holdout_calibration = split_calibration(calibration)
-            mixed_planner.calibration = holdout_calibration
-            mixed_planner.optimization_calibration = train_calibration
-            args._optimization_calibration = train_calibration
-            if optimization.enabled:
-                args._optimization_calibration_digest = calibration_digest(train_calibration)
-        mixed_source_hashes = hash_checkpoint_files(info, refresh=True)
-        mixed_plan = mixed_planner.plan(info, decisions)
-        if hash_checkpoint_files(info, refresh=True) != mixed_source_hashes:
-            raise InputError('source changed during mixed planning; refusing cached encodings and plan')
-        mixed_plan["measured_workloads"] = workloads
-        mixed_plan['calibration_digest'] = calibration_digest(calibration)
-        mixed_plan['whole_file_byte_limit'] = args._max_output_bytes
-        if args.kernel_costs:
-            mixed_plan["kernel_costs_sha256"] = sha256_file(args.kernel_costs)
-        args._runtime_gpu_name = runtime_caps.gpu_name
-        _check_runtime_compatibility(env, mixed_planner, decisions, warnings)
-        if certificate is not None:
-            required = sorted({
-                d.format for d in decisions
-                if d.kind == DecisionKind.QUANTIZE
-                and d.format in MIXED_FORMATS})
-            _check_runtime_certificate(certificate, runtime_caps, required)
-        if not calibration:
-            warnings.append(
-                "mixed planner: no calibration activations, quality gates use "
-                "weight-only reconstruction error (pass --calibration-source "
-                "for activation-aware gates)")
-        if mixed_plan["promotions"]:
-            warnings.append(
-                f"mixed planner: global gate required {len(mixed_plan['promotions'])} "
-                "promotion(s): " + "; ".join(mixed_plan["promotions"][:3]) +
-                (" ..." if len(mixed_plan["promotions"]) > 3 else ""))
-        if mixed_plan["kept"]:
-            warnings.append(
-                f"mixed planner kept {mixed_plan['kept']} layer(s) at original "
-                "precision (no candidate within the quality gate)")
-        if profile_name != "balanced" and args.quality_gate is None \
-                and args.global_error_gate is None:
-            warnings.append(
-                f"mixed profile {profile_name}: layer gate "
-                f"{mixed_planner.layer_gate}, global gate "
-                f"{mixed_planner.global_gate} (override with --quality-gate / "
-                "--global-error-gate)")
-    elif needs_sensitivity_prepass:
-        sensitivity = SensitivityAnalyzer(
-            args.sensitivity_threshold,
-            args.error_threshold if args.error_threshold is not None
-            else detection.policy.max_rel_l2,
-            calibration)
-        apply_sensitivity_prepass(info, decisions, sensitivity, args.max_memory,
-                                  effective_device, compute_dtype,
-                                  seed=args.seed,
-                                  codebook_mode=args.codebook_mode, optimization=optimization)
-        kept_by_sensitivity = sum(1 for m in sensitivity.results.values() if m.kept)
-        if kept_by_sensitivity:
-            warnings.append(
-                f"sensitivity prepass retained {kept_by_sensitivity} layer(s) at "
-                "original precision")
-        post_prepass_hashes = hash_checkpoint_files(info, refresh=True)
-        if post_prepass_hashes != prepass_source_hashes:
-            raise InputError(
-                "one or more source files changed during sensitivity planning; "
-                "refusing to build an output inventory from mixed data")
+    return calibration
 
-    plan = ConversionPlan(fmt=fmt, detection=detection, decisions=decisions,
+
+def _check_w6a8_planning(run: _Conversion, decisions: List[TensorDecision],
+                         calibration: Any, effective_runtime: str) -> None:
+    args = run.args
+    if args.require_calibration:
+        missing = [d.name for d in decisions if d.kind == DecisionKind.QUANTIZE
+                   and (calibration is None or not any(key in calibration.layers for key in (d.name, d.layer)))]
+        if missing:
+            raise CalibrationError("calibration missing for targeted W6A8 layers: " + ", ".join(missing[:5]))
+    if args.require_runtime_certificate and not args.runtime_certificate:
+        raise RuntimeCompatibilityError("--require-runtime-certificate needs --runtime-certificate")
+    if args.runtime_certificate:
+        _check_runtime_certificate(load_runtime_certificate(args.runtime_certificate),
+                                   runtime_capabilities_for(effective_runtime, run.env), [FORMAT_W6A8])
+
+
+def _plan_mixed(run: _Conversion, decisions: List[TensorDecision], calibration: Any,
+                effective_runtime: str, effective_device: Any, compute_dtype: Any) -> MixedPlanner:
+    args, env, info, warnings, optimization = run.args, run.env, run.info, run.warnings, run.optimization
+    events.emit("phase", phase="mixed_analysis")
+    profile_name = getattr(args, "_mixed_profile_name", "balanced")
+    layer_gate = args.quality_gate
+    if layer_gate is None and args.error_threshold is not None:
+        layer_gate = args.error_threshold
+    runtime_caps = runtime_capabilities_for(effective_runtime, env)
+    certificate = None
+    if args.runtime_certificate:
+        certificate = load_runtime_certificate(args.runtime_certificate)
+        warnings.append(
+            f"runtime certificate loaded: backend={certificate.backend}, "
+            f"gpu={certificate.gpu or 'unknown'}, formats="
+            f"{sorted(certificate.formats)}")
+        # Apply the certificate to the capabilities BEFORE planning: the
+        # planner, its summary and the extension metadata must all observe
+        # one final authoritative RuntimeCapabilities (never mutated after
+        # planning). Coverage of the actually selected formats is still
+        # enforced after planning, when the selection is known.
+        _check_runtime_certificate(certificate, runtime_caps, [])
+        cap_map = {FORMAT_W4A4: ("w4a4", runtime_caps.w4a4),
+                   FORMAT_W4A8: ("w4a8", runtime_caps.w4a8),
+                   FORMAT_INT8: ("int8", runtime_caps.int8),
+                   FORMAT_W6A8: ("w6a8", runtime_caps.w6a8)}
+        certed = {
+            field: dataclasses.replace(cap, certified=True)
+            for name, (field, cap) in cap_map.items()
+            if name in certificate.formats}
+        runtime_caps = dataclasses.replace(
+            runtime_caps, runtime_certified=True, **certed)
+    costs, workloads = {}, []
+    if args.kernel_costs:
+        if effective_runtime != "nvidia":
+            raise UsageError("--kernel-costs currently requires --target-runtime nvidia")
+        try:
+            costs, workloads = load_kernel_costs(args.kernel_costs, env.comfy_kitchen_rev)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            raise UsageError(f"invalid --kernel-costs: {exc}") from exc
+    mixed_planner = MixedPlanner(
+        profile_name, calibration, args.max_memory, effective_device,
+        compute_dtype,
+        disabled_formats=getattr(args, "_mixed_disabled_formats", ()),
+        layer_gate=layer_gate,
+        global_gate=args.global_error_gate,
+        runtime=runtime_caps,
+        compression_target_bpp=args.max_linear_bytes_per_param,
+        max_bf16_fraction=args.max_bf16_fraction,
+        linear_dtype=args.w4a4_linear_dtype,
+        runtime_certificate=certificate,
+        seed=args.seed,
+        codebook_mode=args.codebook_mode,
+        objective=args.mixed_objective, kernel_costs=costs,
+        enable_w6a8=args.enable_w6a8, w6a8_group_size=args.w6a8_group_size,
+        optimization=optimization, workloads=workloads,
+        target_bytes=(args._max_output_bytes - 16384 - sum(len(t.name.encode()) * 4 + 512 for t in info.tensors)
+                      - len(json_dumps(info.metadata).encode()) if args._max_output_bytes is not None else None),
+        enable_int8_convrot=getattr(args, 'enable_int8_convrot', False),
+        quality_reference=getattr(args, 'quality_reference', 'none'))
+    if args.require_runtime_certificate and certificate is None:
+        raise RuntimeCompatibilityError(
+            "--require-runtime-certificate needs --runtime-certificate "
+            "(supply a certificate from real native execution on the "
+            "target inference machine)")
+    if args.require_calibration or profile_name == 'adaptive':
+        missing = [d.name for d in decisions if d.kind == DecisionKind.QUANTIZE
+                   and mixed_planner._activations(d.name) is None]
+        if missing:
+            raise CalibrationError(
+                f"calibration missing for {len(missing)} targeted layers: " + ", ".join(missing[:5]))
+    if profile_name == 'adaptive':
+        if not any(len(key) == 7 for key in costs):
+            raise UsageError('adaptive planning requires workload-aware kitchen-costs/v3 measurements')
+        train_calibration, holdout_calibration = split_calibration(calibration)
+        mixed_planner.calibration = holdout_calibration
+        mixed_planner.optimization_calibration = train_calibration
+        args._optimization_calibration = train_calibration
+        if optimization.enabled:
+            args._optimization_calibration_digest = calibration_digest(train_calibration)
+    mixed_source_hashes = hash_checkpoint_files(info, refresh=True)
+    mixed_plan = mixed_planner.plan(info, decisions)
+    if hash_checkpoint_files(info, refresh=True) != mixed_source_hashes:
+        raise InputError('source changed during mixed planning; refusing cached encodings and plan')
+    mixed_plan["measured_workloads"] = workloads
+    mixed_plan['calibration_digest'] = calibration_digest(calibration)
+    mixed_plan['whole_file_byte_limit'] = args._max_output_bytes
+    if args.kernel_costs:
+        mixed_plan["kernel_costs_sha256"] = sha256_file(args.kernel_costs)
+    args._runtime_gpu_name = runtime_caps.gpu_name
+    _check_runtime_compatibility(env, mixed_planner, decisions, warnings)
+    if certificate is not None:
+        required = sorted({
+            d.format for d in decisions
+            if d.kind == DecisionKind.QUANTIZE
+            and d.format in MIXED_FORMATS})
+        _check_runtime_certificate(certificate, runtime_caps, required)
+    if not calibration:
+        warnings.append(
+            "mixed planner: no calibration activations, quality gates use "
+            "weight-only reconstruction error (pass --calibration-source "
+            "for activation-aware gates)")
+    if mixed_plan["promotions"]:
+        warnings.append(
+            f"mixed planner: global gate required {len(mixed_plan['promotions'])} "
+            "promotion(s): " + "; ".join(mixed_plan["promotions"][:3]) +
+            (" ..." if len(mixed_plan["promotions"]) > 3 else ""))
+    if mixed_plan["kept"]:
+        warnings.append(
+            f"mixed planner kept {mixed_plan['kept']} layer(s) at original "
+            "precision (no candidate within the quality gate)")
+    if profile_name != "balanced" and args.quality_gate is None \
+            and args.global_error_gate is None:
+        warnings.append(
+            f"mixed profile {profile_name}: layer gate "
+            f"{mixed_planner.layer_gate}, global gate "
+            f"{mixed_planner.global_gate} (override with --quality-gate / "
+            "--global-error-gate)")
+    return mixed_planner
+
+
+def _run_sensitivity_prepass(run: _Conversion, decisions: List[TensorDecision], calibration: Any,
+                             effective_device: Any, compute_dtype: Any,
+                             prepass_source_hashes: Optional[Dict[str, str]]) -> SensitivityAnalyzer:
+    args, info = run.args, run.info
+    sensitivity = SensitivityAnalyzer(
+        args.sensitivity_threshold,
+        args.error_threshold if args.error_threshold is not None
+        else run.detection.policy.max_rel_l2,
+        calibration)
+    apply_sensitivity_prepass(info, decisions, sensitivity, args.max_memory,
+                              effective_device, compute_dtype,
+                              seed=args.seed,
+                              codebook_mode=args.codebook_mode, optimization=run.optimization)
+    kept_by_sensitivity = sum(1 for m in sensitivity.results.values() if m.kept)
+    if kept_by_sensitivity:
+        run.warnings.append(
+            f"sensitivity prepass retained {kept_by_sensitivity} layer(s) at "
+            "original precision")
+    post_prepass_hashes = hash_checkpoint_files(info, refresh=True)
+    if post_prepass_hashes != prepass_source_hashes:
+        raise InputError(
+            "one or more source files changed during sensitivity planning; "
+            "refusing to build an output inventory from mixed data")
+    return sensitivity
+
+
+def _build_plan(run: _Conversion, fmt: str, decisions: List[TensorDecision],
+                mixed_planner: Optional[MixedPlanner], effective_backend: str,
+                out_dtype: Any) -> ConversionPlan:
+    info = run.info
+    plan = ConversionPlan(fmt=fmt, detection=run.detection, decisions=decisions,
                           metadata_quant={}, metadata_ext={}, output_entries=[])
     plan.device = effective_backend
     if mixed_planner is not None:
@@ -704,16 +823,20 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     plan.n_kept = len(decisions) - plan.n_quantized
     plan.chunked_layers = {
         d.name for d in plan.quantized_layers()
-        if _quant_work_bytes(info.by_name(d.name), d.format, optimization) > args.max_memory
+        if _quant_work_bytes(info.by_name(d.name), d.format, run.optimization) > run.args.max_memory
     }
     plan.metadata_quant = build_quant_metadata(info, plan)
+    return plan
 
+
+def _check_plan(run: _Conversion, plan: ConversionPlan) -> Tuple[List[str], Dict[str, Any], int]:
+    args, info, detection = run.args, run.info, run.detection
     events.emit("plan", architecture=detection.architecture,
-                       format=args.format, quantized=plan.n_quantized,
-                       preserved=plan.n_kept, output_bytes=total_out,
-                       formats={name: sum(d.format == name for d in plan.quantized_layers())
-                                for name in sorted({d.format for d in plan.quantized_layers()})})
-    _emit_plan_layers(info, decisions)
+                format=args.format, quantized=plan.n_quantized,
+                preserved=plan.n_kept, output_bytes=plan.total_out_bytes,
+                formats={name: sum(d.format == name for d in plan.quantized_layers())
+                         for name in sorted({d.format for d in plan.quantized_layers()})})
+    _emit_plan_layers(info, plan.decisions)
 
     if plan.n_quantized == 0:
         raise PolicyError(
@@ -736,13 +859,11 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
                             (args.group_size or 16))
     low_comp = low_compression_warning(comp_stats, detection.architecture)
     if low_comp:
-        warnings.append(low_comp)
+        run.warnings.append(low_comp)
     miss = policy_miss_warning(comp_stats, detection.architecture)
     if miss:
-        warnings.append(miss)
-    fail_threshold = args.min_quantized_byte_fraction
-    if fail_threshold is None and args.fail_on_low_compression:
-        fail_threshold = 0.10
+        run.warnings.append(miss)
+    fail_threshold = low_compression_threshold(args)
     frac = comp_stats.get("quantized_fraction")
     if fail_threshold is not None and frac is not None and frac < fail_threshold:
         flag = ("--min-quantized-byte-fraction" if args.min_quantized_byte_fraction
@@ -751,42 +872,52 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             f"quantized byte fraction {100*frac:.1f}% is below the required "
             f"{100*fail_threshold:.0f}% ({flag}); nothing was written. Lower "
             "the threshold or drop the flag to allow the conversion.")
+    return quant_rows, comp_stats, effective_group_size
 
-    if args.metadata_only:
-        metadata_input_hashes = hash_checkpoint_files(info)
-        meta = dict(info.metadata)
-        meta[METADATA_KEY_QUANT] = json_dumps(plan.metadata_quant)
-        meta[METADATA_KEY_EXT] = json_dumps(build_extension_metadata(
-            info, plan, env, args, calibration, sensitivity,
-            metadata_input_hashes, "", {"status": "metadata-only"},
-            warnings))
-        if args.output:
-            _atomic_write_json(args.output + ".metadata.json", meta, indent=1)
-            log().info("metadata written to %s.metadata.json", args.output)
-        else:
-            print(json_dumps(meta))
-        report = build_report(info, plan, env, args, detection, None, {}, {},
-                              {}, "", time.time() - t_start, warnings, quant_rows)
-        _write_reports(args, report)
-        return 0
 
-    if args.dry_run:
-        report = build_report(info, plan, env, args, detection, None, {}, {},
-                              {}, "", time.time() - t_start, warnings, quant_rows)
-        _write_reports(args, report)
-        print_console_summary(
-            out_path=out_path, input_bytes=info.total_bytes,
-            output_bytes=total_out, architecture=detection.architecture,
-            confidence=detection.confidence, n_quantized=plan.n_quantized,
-            n_kept=plan.n_kept, comp=comp_stats, group_size=effective_group_size,
-            validation=None, elapsed=time.time() - t_start, warnings=warnings,
-            report_path=os.path.abspath(args.report) if args.report else None,
-            dry_run=True, mixed_plan=plan.mixed_plan, format_name=plan.fmt)
-        return 0
+def _write_metadata_only(run: _Conversion, planned: _PlannedConversion) -> int:
+    args, info, plan = run.args, run.info, planned.plan
+    metadata_input_hashes = hash_checkpoint_files(info)
+    meta = dict(info.metadata)
+    meta[METADATA_KEY_QUANT] = json_dumps(plan.metadata_quant)
+    meta[METADATA_KEY_EXT] = json_dumps(build_extension_metadata(
+        info, plan, run.env, args, planned.calibration, planned.sensitivity,
+        metadata_input_hashes, "", {"status": "metadata-only"},
+        run.warnings))
+    if args.output:
+        _atomic_write_json(args.output + ".metadata.json", meta, indent=1)
+        log().info("metadata written to %s.metadata.json", args.output)
+    else:
+        print(json_dumps(meta))
+    run.write_report(plan, None, {}, {}, {}, "", planned.quant_rows)
+    return 0
 
-    # ---- conversion ----
+
+def _print_summary(run: _Conversion, planned: _PlannedConversion, out_path: str,
+                   output_bytes: int, validation: Optional[Dict[str, Any]], dry_run: bool) -> None:
+    args, plan = run.args, planned.plan
+    print_console_summary(
+        out_path=out_path, input_bytes=run.info.total_bytes,
+        output_bytes=output_bytes,
+        architecture=run.detection.architecture, confidence=run.detection.confidence,
+        n_quantized=plan.n_quantized, n_kept=plan.n_kept, comp=planned.comp_stats,
+        group_size=planned.group_size, validation=validation,
+        elapsed=time.time() - run.started, warnings=run.warnings,
+        report_path=os.path.abspath(args.report) if args.report else None,
+        dry_run=dry_run, mixed_plan=plan.mixed_plan, format_name=plan.fmt)
+
+
+def _print_dry_run(run: _Conversion, planned: _PlannedConversion, paths: _OutputPaths) -> int:
+    run.write_report(planned.plan, None, {}, {}, {}, "", planned.quant_rows)
+    _print_summary(run, planned, paths.final, planned.plan.total_out_bytes, None, dry_run=True)
+    return 0
+
+
+# ---- execution, validation and publication phases ----
+
+def _run_engine(run: _Conversion, plan: ConversionPlan, paths: _OutputPaths) -> Dict[str, str]:
     events.emit("phase", phase="conversion")
-    engine = ConversionEngine(info, plan, args, state_path, tmp_path, staged_path)
+    engine = ConversionEngine(run.info, plan, run.args, paths.state, paths.tmp, paths.staged)
     try:
         engine.run()
     except Exception:
@@ -795,51 +926,94 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         finally:
             engine.close()
         log().error("conversion failed; journal %s at %s",
-                    'saved' if engine._journal_writable else 'left unchanged', state_path)
+                    'saved' if engine._journal_writable else 'left unchanged', paths.state)
         raise
     engine.close()
-    input_hashes = engine.input_hashes
-    metrics = sensitivity.results if sensitivity else {}
+    return engine.input_hashes
 
-    # ---- provisional metadata + validation ----
-    tensor_payload_sha = sha256_safetensors_payload(staged_path)
-    # Preserve benign source metadata, overriding only the two keys owned by
-    # this converter.  Quantized inputs are refused earlier, so replacement is
-    # defensive rather than a re-quantization path.
-    qm_meta = dict(info.metadata)
-    qm_meta[METADATA_KEY_QUANT] = json_dumps(serialized_quant_metadata(plan.metadata_quant))
-    ext_meta = build_extension_metadata(
-        info, plan, env, args, calibration, sensitivity, input_hashes,
-        tensor_payload_sha, {"status": "pending"}, warnings)
-    qm_meta[METADATA_KEY_EXT] = json_dumps(ext_meta)
-    log().info("building validation copy at %s", validation_path)
-    republish_with_metadata(staged_path, validation_path, qm_meta, entries)
 
-    # ---- validation ----
+def _validate_and_publish(run: _Conversion, planned: _PlannedConversion, paths: _OutputPaths,
+                          input_hashes: Dict[str, str]) -> int:
+    tensor_payload_sha = sha256_safetensors_payload(paths.staged)
+    qm_meta = _candidate_metadata(run, planned, input_hashes, tensor_payload_sha,
+                                  {"status": "pending"})
+    log().info("building validation copy at %s", paths.validation)
+    republish_with_metadata(paths.staged, paths.validation, qm_meta, planned.plan.output_entries)
+
     events.emit("phase", phase="validation")
-    validator = Validator(info, plan, validation_path, args, env)
-    with CheckpointReader(info) as validation_reader:
-        summary = validator.run(reader=validation_reader, metrics=metrics,
+    validator = Validator(run.info, planned.plan, paths.validation, run.args, run.env)
+    with CheckpointReader(run.info) as validation_reader:
+        summary = validator.run(reader=validation_reader, metrics=planned.metrics,
                                 input_hashes=input_hashes)
-
     # Never expose a newly generated checkpoint at the requested output path
     # when standalone validation failed.  The checksummed staged file and state
     # remain available for --resume; an older --overwrite target is untouched.
     if summary["n_failed"]:
-        warnings.append(
+        return _reject_candidate(
+            run, planned, paths, summary, input_hashes,
             f"validation failed {summary['n_failed']} checks; new output was not "
             "published and any pre-existing output remains unchanged")
-        report = build_report(
-            info, plan, env, args, detection, calibration, metrics, summary,
-            input_hashes, "", time.time() - t_start, warnings, quant_rows)
-        _write_reports(args, report)
-        if os.path.exists(validation_path):
-            _remove_temp_path(validation_path)
-        return 2
 
-    # Embed the completed tensor/schema validation.  Full-file SHA256 is not
-    # embedded because changing the header changes that hash; the stable tensor
-    # payload hash is embedded instead.
+    # Build and inspect the exact final checkpoint at the private validation
+    # path.  Only a fully reopened, payload-bound candidate may replace the
+    # requested output (including an existing --overwrite target).
+    qm_meta = _candidate_metadata(run, planned, input_hashes, tensor_payload_sha,
+                                  _embedded_validation(summary))
+    republish_with_metadata(paths.staged, paths.validation, qm_meta, planned.plan.output_entries)
+
+    # The publication digest reads the same private candidate as the payload
+    # re-check, so both run concurrently.
+    output_digest = BackgroundDigest(sha256_file, paths.validation)
+    final_ok = _check_final_candidate(paths.validation, summary)
+    events.emit("validation", ok=final_ok and not summary.get("n_failed", 0),
+                checks=len(summary.get("checks", [])))
+    if not final_ok:
+        output_digest.cancel()
+        return _reject_candidate(
+            run, planned, paths, summary, input_hashes,
+            "final checkpoint candidate failed integrity checks; requested output "
+            "was not replaced")
+
+    args = run.args
+    if args._max_output_bytes is not None and os.path.getsize(paths.validation) > args._max_output_bytes:
+        output_digest.cancel()
+        raise CompressionGateError(
+            f'whole-file compression gate failed: {os.path.getsize(paths.validation)} bytes exceeds '
+            f'{args._max_output_bytes}; metadata and protected tensors are included; output was not replaced')
+    events.emit("phase", phase="publication")
+    output_sha = output_digest.result()
+    _publish_output(paths.validation, paths.final,
+                    overwrite=bool(args.overwrite),
+                    expected_identity=paths.expected_identity)
+    _fsync_parent(paths.final)
+    _record_output_hash(summary, output_sha, args.validate)
+
+    run.write_report(planned.plan, planned.calibration, planned.metrics, summary,
+                     input_hashes, output_sha, planned.quant_rows)
+    _print_summary(run, planned, paths.final, os.path.getsize(paths.final), summary, dry_run=False)
+    events.emit("artifact", path=paths.final, bytes=os.path.getsize(paths.final),
+                quantized=planned.plan.n_quantized)
+    paths.remove_temporaries()
+    return 0 if summary["n_failed"] == 0 else 2
+
+
+def _candidate_metadata(run: _Conversion, planned: _PlannedConversion,
+                        input_hashes: Dict[str, str], tensor_payload_sha: str,
+                        validation: Dict[str, Any]) -> Dict[str, str]:
+    # Preserve benign source metadata, overriding only the two keys owned by
+    # this converter.  Quantized inputs are refused earlier, so replacement is
+    # defensive rather than a re-quantization path.
+    qm_meta = dict(run.info.metadata)
+    qm_meta[METADATA_KEY_QUANT] = json_dumps(serialized_quant_metadata(planned.plan.metadata_quant))
+    qm_meta[METADATA_KEY_EXT] = json_dumps(build_extension_metadata(
+        run.info, planned.plan, run.env, run.args, planned.calibration, planned.sensitivity,
+        input_hashes, tensor_payload_sha, validation, run.warnings))
+    return qm_meta
+
+
+def _embedded_validation(summary: Dict[str, Any]) -> Dict[str, Any]:
+    # Full-file SHA256 is not embedded because changing the header changes
+    # that hash; the stable tensor payload hash is embedded instead.
     embedded_summary = json.loads(json_dumps(summary))
     embedded_summary["checks"] = [
         check for check in embedded_summary.get("checks", [])
@@ -850,18 +1024,10 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         "tensor payload, reconstruction, policy and metadata schema before final "
         "metadata publication; tensor payload is unchanged by publication")
     _refresh_validation_summary(embedded_summary)
-    ext_meta = build_extension_metadata(
-        info, plan, env, args, calibration, sensitivity, input_hashes,
-        tensor_payload_sha, embedded_summary, warnings)
-    qm_meta[METADATA_KEY_EXT] = json_dumps(ext_meta)
-    # Build and inspect the exact final checkpoint at the private validation
-    # path.  Only a fully reopened, payload-bound candidate may replace the
-    # requested output (including an existing --overwrite target).
-    republish_with_metadata(staged_path, validation_path, qm_meta, entries)
+    return embedded_summary
 
-    # The publication digest reads the same private candidate as the payload
-    # re-check below, so both run concurrently.
-    output_digest = BackgroundDigest(sha256_file, validation_path)
+
+def _check_final_candidate(validation_path: str, summary: Dict[str, Any]) -> bool:
     final_ok = False
     try:
         with RawSafetensorsFile(validation_path) as final_raw:
@@ -881,72 +1047,32 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
             "detail": f"final reopen failed: {e}", "reason": "",
         })
     _refresh_validation_summary(summary)
-    events.emit("validation", ok=final_ok and not summary.get("n_failed", 0),
-                       checks=len(summary.get("checks", [])))
-    if not final_ok:
-        output_digest.cancel()
-        warnings.append(
-            "final checkpoint candidate failed integrity checks; requested output "
-            "was not replaced")
-        report = build_report(
-            info, plan, env, args, detection, calibration, metrics, summary,
-            input_hashes, "", time.time() - t_start, warnings, quant_rows)
-        _write_reports(args, report)
-        if os.path.exists(validation_path):
-            _remove_temp_path(validation_path)
-        return 2
+    return final_ok
 
-    if args._max_output_bytes is not None and os.path.getsize(validation_path) > args._max_output_bytes:
-        output_digest.cancel()
-        raise CompressionGateError(
-            f'whole-file compression gate failed: {os.path.getsize(validation_path)} bytes exceeds '
-            f'{args._max_output_bytes}; metadata and protected tensors are included; output was not replaced')
-    events.emit("phase", phase="publication")
-    output_sha = output_digest.result()
-    _publish_output(validation_path, out_path,
-                    overwrite=bool(args.overwrite),
-                    expected_identity=expected_dest_identity)
-    _fsync_parent(out_path)
+
+def _reject_candidate(run: _Conversion, planned: _PlannedConversion, paths: _OutputPaths,
+                      summary: Dict[str, Any], input_hashes: Dict[str, str], warning: str) -> int:
+    run.warnings.append(warning)
+    run.write_report(planned.plan, planned.calibration, planned.metrics, summary,
+                     input_hashes, "", planned.quant_rows)
+    if os.path.exists(paths.validation):
+        _remove_temp_path(paths.validation)
+    return 2
+
+
+def _record_output_hash(summary: Dict[str, Any], output_sha: str, validate: bool) -> None:
     summary["output_sha256"] = output_sha
     output_hash_check = next(
         (check for check in summary.get("checks", [])
          if check.get("name") == "output-hash"), None)
     if output_hash_check is not None:
         output_hash_check["detail"] = f"sha256={output_sha}"
-    elif args.validate:
+    elif validate:
         summary.setdefault("checks", []).append({
             "name": "output-hash", "status": "passed",
             "detail": f"sha256={output_sha}", "reason": "",
         })
     _refresh_validation_summary(summary)
-
-    # ---- report ----
-    report = build_report(info, plan, env, args, detection, calibration, metrics,
-                          summary, input_hashes, output_sha,
-                          time.time() - t_start, warnings, quant_rows)
-    _write_reports(args, report)
-    print_console_summary(
-        out_path=out_path, input_bytes=info.total_bytes,
-        output_bytes=os.path.getsize(out_path),
-        architecture=detection.architecture, confidence=detection.confidence,
-        n_quantized=plan.n_quantized, n_kept=plan.n_kept, comp=comp_stats,
-        group_size=effective_group_size, validation=summary,
-        elapsed=time.time() - t_start, warnings=warnings,
-        report_path=os.path.abspath(args.report) if args.report else None,
-        dry_run=False, mixed_plan=plan.mixed_plan, format_name=plan.fmt)
-    events.emit("artifact", path=out_path, bytes=os.path.getsize(out_path),
-                       quantized=plan.n_quantized)
-
-    # ---- cleanup ----
-    if os.path.exists(tmp_path):
-        _remove_temp_path(tmp_path)
-    if os.path.exists(validation_path):
-        _remove_temp_path(validation_path)
-    if os.path.exists(staged_path):
-        _remove_temp_path(staged_path)
-    if os.path.exists(state_path):
-        _remove_temp_path(state_path)
-    return 0 if summary["n_failed"] == 0 else 2
 
 
 def resolve_input_sources(args) -> None:

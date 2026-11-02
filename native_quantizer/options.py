@@ -151,3 +151,11 @@ def validate_conversion_options(args) -> None:
             "--group-size must be 16: only the validated W4A8 configuration "
             "(group_size=16, convrot_groupsize=256) is supported by the "
             "production runtime")
+
+
+def low_compression_threshold(args) -> float | None:
+    """Minimum quantized byte fraction; --fail-on-low-compression means 10%."""
+    threshold = args.min_quantized_byte_fraction
+    if threshold is None and args.fail_on_low_compression:
+        threshold = 0.10
+    return threshold

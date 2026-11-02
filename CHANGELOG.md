@@ -9,6 +9,9 @@
   kernel, write passthrough tensors straight to the spool, compute the final
   output digest alongside the payload re-check, and drop an unused full-output
   hash in the planned engine. W4A8 codebook search uses int32 indices.
+- Split the planned and native conversion drivers into phase functions with a
+  shared request context and one low-compression threshold rule; outputs,
+  reports and error behavior are unchanged.
 
 - Add native Fibo2/MOSS-Image policies and correct fused Ming attention, nested
   Qwen encoder detection and Trellis2/Pixal3D block selection.
