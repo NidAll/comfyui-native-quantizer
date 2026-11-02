@@ -1,4 +1,4 @@
-"""Optional, versioned JSONL events for local frontends.
+"""Optional, versioned JSONL events for scripts that follow a conversion.
 
 This module has no torch or UI dependencies. Events are best-effort telemetry;
 the converter's exit status and published output remain authoritative.

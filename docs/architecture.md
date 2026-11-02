@@ -37,7 +37,7 @@ Paths below are relative to `native_quantizer/`.
 | `testing/` | Fixtures and self-tests loaded only when requested |
 
 Library modules import their owning dependencies directly. They do not import
-application/command modules, optional frontends or root entry-point facades.
+application/command modules or root entry-point facades.
 Reference decoders remain independent from production encoders. Lightweight API,
 help and catalog imports avoid loading PyTorch and regression fixtures.
 

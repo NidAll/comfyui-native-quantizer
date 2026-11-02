@@ -9,21 +9,104 @@ import os
 import stat
 import struct
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from native_quantizer.errors import InputError, OutputError
 
+# Hashing and file reads release the GIL, so a few threads overlap independent
+# digests without changing any result.
+HASH_WORKERS = 4
 
-def sha256_file(path: str, chunk: int = 1 << 22) -> str:
+
+class HashCancelled(Exception):
+    """A background digest was abandoned because its caller failed first."""
+
+
+def sha256_file(path: str, chunk: int = 1 << 22,
+                cancel: Optional[threading.Event] = None) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while True:
+            if cancel is not None and cancel.is_set():
+                raise HashCancelled(path)
             data = f.read(chunk)
             if not data:
                 break
             h.update(data)
     return h.hexdigest()
+
+
+def sha256_files(paths: Sequence[str],
+                 cancel: Optional[threading.Event] = None) -> Dict[str, str]:
+    """Full-file digests keyed by path; independent files are hashed concurrently."""
+    ordered = sorted(paths)
+    if len(ordered) <= 1:
+        return {path: sha256_file(path, cancel=cancel) for path in ordered}
+    with ThreadPoolExecutor(min(HASH_WORKERS, len(ordered))) as pool:
+        digests = list(pool.map(lambda path: sha256_file(path, cancel=cancel), ordered))
+    return dict(zip(ordered, digests))
+
+
+class BackgroundDigest:
+    """Run one digest function on a daemon thread while the caller keeps working.
+
+    ``result`` re-raises the worker's exception. ``cancel`` lets a failing caller
+    exit without waiting for a full read of a large checkpoint.
+    """
+
+    def __init__(self, function, *args):
+        self._cancel = threading.Event()
+        self._value: Any = None
+        self._error: Optional[BaseException] = None
+
+        def run() -> None:
+            try:
+                self._value = function(*args, cancel=self._cancel)
+            except BaseException as exc:  # re-raised in the caller's thread
+                self._error = exc
+        self._thread = threading.Thread(target=run, name="sha256", daemon=True)
+        self._thread.start()
+
+    def result(self) -> Any:
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+
+def copy_file_bytes(src: Any, dst: Any, count: int) -> None:
+    """Copy ``count`` bytes between file objects at their current positions.
+
+    Uses in-kernel ``copy_file_range`` where available and falls back to a
+    bounded userspace copy. Both positions advance by ``count``.
+    """
+    src.flush()
+    dst.flush()
+    src_start, dst_start = src.tell(), dst.tell()
+    copied = 0
+    if hasattr(os, "copy_file_range"):
+        with contextlib.suppress(OSError):
+            while copied < count:
+                step = os.copy_file_range(src.fileno(), dst.fileno(), count - copied,
+                                          src_start + copied, dst_start + copied)
+                if step == 0:
+                    break
+                copied += step
+    src.seek(src_start + copied)
+    dst.seek(dst_start + copied)
+    remaining = count - copied
+    while remaining:
+        data = src.read(min(1 << 20, remaining))
+        if not data:
+            raise OutputError(f"source ended {remaining} bytes early during copy")
+        dst.write(data)
+        remaining -= len(data)
 
 
 def sha256_safetensors_payload(path: str, chunk: int = 1 << 22) -> str:

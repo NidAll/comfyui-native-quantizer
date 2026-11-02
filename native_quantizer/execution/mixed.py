@@ -33,7 +33,7 @@ from native_quantizer.files import (
     _load_json_object,
     _open_regular_nofollow,
     _remove_temp_path,
-    sha256_file,
+    sha256_files,
 )
 from native_quantizer.formats import format_scale_suffixes
 from native_quantizer.identity import FORMAT_W4A8, LAYER_CONF_KEY, W4A8_ALS_ITERS
@@ -66,7 +66,6 @@ class ConversionEngine:
             fmt=plan.fmt)
         self.writer: Optional[SafetensorsStreamWriter] = None
         self.metrics: Dict[str, TensorMetrics] = {}
-        self.output_hash = ""
         self._journal_writable = False
         self.optimization = OptimizationConfig.from_options(args)
 
@@ -240,15 +239,13 @@ class ConversionEngine:
                 and os.path.exists(self.final_path):
             log().info("recovering completed staged output %s", self.final_path)
             self._verify_completed_output(entries_by_name)
-            post_hashes = {
-                path: sha256_file(path) for path in sorted(self.info.files)}
+            post_hashes = sha256_files(self.info.files)
             if post_hashes != self.input_hashes:
                 raise InputError(
                     "one or more source files changed since the staged output was "
                     "created")
             self.state.done = True
             _atomic_write_json(self.state_path, dataclasses.asdict(self.state))
-            self.output_hash = sha256_file(self.final_path)
             return
         if resumed:
             log().info("resuming conversion from %s", self.tmp_path)
@@ -353,14 +350,13 @@ class ConversionEngine:
         if completed_names != expected_names:
             missing = sorted(expected_names - completed_names)
             raise OutputError(f"conversion ended with incomplete tensors: {missing[:5]}")
-        post_hashes = {path: sha256_file(path) for path in sorted(self.info.files)}
+        post_hashes = sha256_files(self.info.files)
         if post_hashes != self.input_hashes:
             raise InputError(
                 "one or more source files changed during conversion; refusing to "
                 "publish a mixed checkpoint")
         self.save_state()
         self.writer.finalize(self.final_path)
-        self.output_hash = sha256_file(self.final_path)
         self.state.done = True
         _atomic_write_json(self.state_path, dataclasses.asdict(self.state))
         log().info("conversion complete: %s", self.final_path)

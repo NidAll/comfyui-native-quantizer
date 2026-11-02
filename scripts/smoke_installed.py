@@ -22,8 +22,6 @@ def main() -> int:
     from native_quantizer import api
     from native_quantizer.identity import get_converter_version
     assert 'torch' not in sys.modules
-    assert 'textual' not in sys.modules
-    assert 'quantizer_tui' not in sys.modules
     assert not any(name.startswith('native_quantizer.testing') for name in sys.modules)
     version = importlib.metadata.version('comfyui-native-quantizer')
     assert get_converter_version() == version

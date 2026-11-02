@@ -8,12 +8,13 @@ from typing import Dict, List, Sequence
 
 from native_quantizer.checkpoint_io.types import CheckpointInfo
 from native_quantizer.errors import OutputError
-from native_quantizer.files import sha256_file
+from native_quantizer.files import sha256_files
 
 
-def hash_checkpoint_files(info: CheckpointInfo, *, refresh: bool = False) -> Dict[str, str]:
+def hash_checkpoint_files(info: CheckpointInfo, *, refresh: bool = False,
+                          cancel=None) -> Dict[str, str]:
     if refresh or not info.source_hashes:
-        info.source_hashes = {path: sha256_file(path) for path in sorted(info.files)}
+        info.source_hashes = sha256_files(info.files, cancel=cancel)
     return dict(info.source_hashes)
 
 

@@ -166,12 +166,13 @@ def assign_codes(normalized: torch.Tensor, codebook: torch.Tensor) -> torch.Tens
         raise PolicyError("W4A8 codebook levels must be monotonic")
     last = codebook.numel() - 1
     values = normalized.contiguous()
-    pos = torch.searchsorted(codebook, values)
-    lo = (pos - 1).clamp(0, last)
-    hi = pos.clamp(0, last)
+    # int32 positions and in-place clamps halve index traffic; values are unchanged.
+    pos = torch.searchsorted(codebook, values, out_int32=True)
+    hi = pos.clamp(max=last)
+    lo = pos.sub_(1).clamp_(min=0)
     distance_lo = (values - codebook[lo]).abs_()
     distance_hi = (values - codebook[hi]).abs_()
-    return torch.where(distance_hi < distance_lo, hi, lo).to(torch.int32)
+    return torch.where(distance_hi < distance_lo, hi, lo)
 
 
 def assign_grid(weight: torch.Tensor, levels: torch.Tensor, s_channel: torch.Tensor) -> torch.Tensor:
@@ -183,14 +184,12 @@ def assign_grid(weight: torch.Tensor, levels: torch.Tensor, s_channel: torch.Ten
     level_rows = levels.reshape(n * groups, 16).contiguous()
     targets = (weight / s_channel.view(-1, 1, 1)).reshape(
         n * groups, group_size).contiguous()
-    last = 15
-    pos = torch.searchsorted(level_rows, targets)
-    lo = (pos - 1).clamp(0, last)
-    hi = pos.clamp(0, last)
-    distance_lo = targets.sub(torch.gather(level_rows, 1, lo)).abs_()
-    distance_hi = targets.sub(torch.gather(level_rows, 1, hi)).abs_()
-    return torch.where(distance_hi < distance_lo, hi, lo).to(
-        torch.int32).reshape(n, groups, group_size)
+    pos = torch.searchsorted(level_rows, targets, out_int32=True)
+    hi = pos.clamp(max=15)
+    lo = pos.sub_(1).clamp_(min=0)
+    distance_lo = targets.sub(torch.gather(level_rows, 1, lo.long())).abs_()
+    distance_hi = targets.sub(torch.gather(level_rows, 1, hi.long())).abs_()
+    return torch.where(distance_hi < distance_lo, hi, lo).reshape(n, groups, group_size)
 
 
 def quantize_w4a8_weight(weight: torch.Tensor, group_size: int = 16,

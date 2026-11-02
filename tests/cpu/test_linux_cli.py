@@ -42,7 +42,6 @@ for argv in [['--help'], ['--version'], ['--list-formats', '--json'],
         try: assert main(argv) == 0
         except SystemExit as exc: assert exc.code == 0
 assert 'torch' not in sys.modules
-assert 'textual' not in sys.modules
 '''
         subprocess.run([sys.executable, '-c', code], cwd=ROOT, check=True)
 

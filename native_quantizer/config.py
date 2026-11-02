@@ -1,4 +1,4 @@
-"""Small, data-only XDG defaults for command-line and local frontend users."""
+"""Small, data-only XDG defaults for command-line users."""
 from __future__ import annotations
 
 import json

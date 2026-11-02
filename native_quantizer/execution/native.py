@@ -37,7 +37,7 @@ from native_quantizer.errors import (
     UsageError,
     ValidationError,
 )
-from native_quantizer.files import _atomic_write_json, _fsync_parent, _publish_output
+from native_quantizer.files import BackgroundDigest, _atomic_write_json, _fsync_parent, _publish_output
 from native_quantizer.formats import NATIVE_ENGINE_REVISION, NATIVE_FORMATS, NATIVE_UNSUPPORTED_OPTIONS
 from native_quantizer.identity import (
     COMPONENT_TEXT_ENCODER,
@@ -177,7 +177,9 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
         return {path: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
                 for path in info.files for s in [os.stat(path)]}
     initial_identity = source_identity()
-    source_hashes = hash_checkpoint_files(info)
+    # Provenance hashing overlaps encoding; the identity check before publication
+    # still rejects any source change made while either was reading.
+    source_digest = BackgroundDigest(hash_checkpoint_files, info)
     with tempfile.TemporaryDirectory(prefix='.comfy-quant-', dir=parent) as tmp:
         spool = NativeSpool(tmp)
         try:
@@ -298,7 +300,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                         dtype = m.dtype if d.kind == DecisionKind.KEEP_PRECISION else (output_dtype or m.dtype)
                         if m.dtype not in FLOAT_DTYPES:
                             dtype = m.dtype
-                        _native_copy(reader, m, spool, dtype, args.max_memory, tmp)
+                        _native_copy(reader, m, spool, dtype, args.max_memory)
                     if args.progress == 'on' or (args.progress == 'auto' and sys.stderr.isatty()):
                         print(f'[{number}/{len(decisions)}] {m.name}', file=sys.stderr)
                     events.emit('progress', phase='conversion', done=number,
@@ -334,7 +336,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
                           'hf': getattr(args, '_hf_provenance', None),
                           'reference_recipe': reference_identity,
                           'key_map': getattr(info, '_source_names', {}),
-                          'source_hashes': _portable_hash_manifest(info.files, source_hashes),
+                          'source_hashes': _portable_hash_manifest(info.files, source_digest.result()),
                           'quality_gate': gate, 'metrics': metrics,
                           'rotation': ('regular-h4-' + args.rotation_backend + '-fp32-v1') if (spec.algorithm == FORMAT_W4A4 or spec.cli == 'int8-convrot') else None,
                           'torch_version': torch.__version__,
@@ -366,6 +368,7 @@ def convert_native(info: CheckpointInfo, detection: DetectionResult, args: Any) 
             _publish_output(candidate, out, overwrite=args.overwrite, expected_identity=identity)
             _fsync_parent(out)
         finally:
+            source_digest.cancel()
             spool.file.close()
     result = {'output': out, 'format': spec.cli, 'quantized_layers': len(layers),
               'input_bytes': info.total_bytes, 'output_bytes': os.path.getsize(out),

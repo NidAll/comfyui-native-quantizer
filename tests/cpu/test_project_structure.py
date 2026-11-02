@@ -14,15 +14,13 @@ PACKAGE = ROOT / 'native_quantizer'
 
 
 class ArchitectureTests(unittest.TestCase):
-    def test_importing_public_api_keeps_computation_and_frontend_unloaded(self):
+    def test_importing_public_api_keeps_computation_unloaded(self):
         code = '''
 import sys
 import native_quantizer
 from native_quantizer import api
 import comfyui_native_quantizer
 assert 'torch' not in sys.modules
-assert 'textual' not in sys.modules
-assert 'quantizer_tui' not in sys.modules
 assert not any(name.startswith('native_quantizer.testing') for name in sys.modules)
 '''
         subprocess.run([sys.executable, '-c', code], cwd=ROOT, check=True)
@@ -34,14 +32,11 @@ from native_quantizer.cli.commands import main
 with contextlib.redirect_stdout(io.StringIO()):
     assert main(['--list-formats']) == 0
 assert not any(name.startswith('native_quantizer.testing') for name in sys.modules)
-assert 'textual' not in sys.modules
-assert 'quantizer_tui' not in sys.modules
 '''
         subprocess.run([sys.executable, '-c', code], cwd=ROOT, check=True)
 
-    def test_backend_imports_do_not_point_into_frontend_or_compatibility_commands(self):
-        forbidden = {'quantizer_tui', 'textual', 'comfyui_native_quantizer',
-                     'kitchen_policy', 'calibration_capture', 'quantizer_events', 'benchmark_kitchen'}
+    def test_backend_imports_do_not_point_into_compatibility_commands(self):
+        forbidden = {'comfyui_native_quantizer', 'kitchen_policy', 'calibration_capture', 'quantizer_events', 'benchmark_kitchen'}
         for path in PACKAGE.rglob('*.py'):
             with self.subTest(module=path.relative_to(ROOT)):
                 for node in ast.walk(ast.parse(path.read_text())):

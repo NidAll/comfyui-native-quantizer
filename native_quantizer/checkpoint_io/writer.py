@@ -6,7 +6,6 @@ import contextlib
 import hashlib
 import json
 import os
-import shutil
 import struct
 import tempfile
 import torch
@@ -17,7 +16,7 @@ from native_quantizer.checkpoint_io.reader import CheckpointReader, RawSafetenso
 from native_quantizer.checkpoint_io.types import TensorMeta
 from native_quantizer.dtypes import TORCH_TO_SAFE, tensor_nbytes, tensor_to_bytes
 from native_quantizer.errors import OutputError, QualityGateError
-from native_quantizer.files import _fsync_parent, _open_regular_nofollow
+from native_quantizer.files import _fsync_parent, _open_regular_nofollow, copy_file_bytes
 from native_quantizer.identity import MAX_SAFETENSORS_HEADER_SIZE
 from native_quantizer.logging import log
 from native_quantizer.utils import human_bytes
@@ -256,7 +255,7 @@ def republish_with_metadata(src_path: str, final_path: str, metadata: Dict[str, 
             with os.fdopen(fd, "wb") as dst:
                 dst.write(struct.pack("<Q", len(raw)))
                 dst.write(raw)
-                shutil.copyfileobj(src, dst, length=1 << 20)
+                copy_file_bytes(src, dst, payload_bytes)
                 dst.flush()
                 os.fsync(dst.fileno())
         with RawSafetensorsFile(final_tmp) as candidate:
@@ -299,7 +298,22 @@ class NativeSpool:
         if stream.tell() != size:
             raise OutputError(f'incomplete tensor {name}')
         stream.seek(0)
-        shutil.copyfileobj(stream, self.file, length=1 << 20)
+        copy_file_bytes(stream, self.file, size)
+        self._register(name, dtype, shape, size)
+
+    def append_chunks(self, name: str, dtype: torch.dtype, shape: Sequence[int], chunks: Any) -> None:
+        """Write a tensor straight into the spool; used where no quality gate can reject it."""
+        if name in self.names:
+            raise OutputError(f'duplicate output tensor {name}')
+        size = tensor_nbytes(dtype, shape)
+        start = self.file.tell()
+        for chunk in chunks:
+            self.file.write(chunk)
+        if self.file.tell() - start != size:
+            raise OutputError(f'incomplete tensor {name}')
+        self._register(name, dtype, shape, size)
+
+    def _register(self, name: str, dtype: torch.dtype, shape: Sequence[int], size: int) -> None:
         self.entries.append({'name': name, 'dtype': dtype, 'shape': tuple(shape), 'nbytes': size})
         self.names.add(name)
 
@@ -318,27 +332,28 @@ class NativeSpool:
             dst.write(struct.pack('<Q', len(raw)))
             dst.write(raw)
             self.file.seek(0)
-            shutil.copyfileobj(self.file, dst, length=1 << 20)
+            copy_file_bytes(self.file, dst, offset)
             dst.flush()
             os.fsync(dst.fileno())
 
 
 def _native_copy(reader: CheckpointReader, meta: TensorMeta, spool: NativeSpool,
-                 dtype: torch.dtype, budget: int, directory: str) -> None:
-    with tempfile.TemporaryFile(dir=directory) as fragment:
+                 dtype: torch.dtype, budget: int) -> None:
+    # Passthrough has no quality gate after writing, and a cast overflow aborts
+    # the whole conversion, so tensors go straight into the spool.
+    def chunks():
         if dtype == meta.dtype:
             data = reader.read_bytes(meta.name)
-            for offset in range(0, len(data), min(budget, 1 << 20)):
-                fragment.write(data[offset:offset + min(budget, 1 << 20)])
-            del data
-        else:
-            flat = reader.read_tensor(meta.name).reshape(-1)
-            step = max(1, budget // 32)
-            for start in range(0, flat.numel(), step):
-                source = flat[start:start + step]
-                converted = source.to(dtype)
-                if not torch.isfinite(converted.float()).all() and torch.isfinite(source.float()).all():
-                    raise QualityGateError(f'{meta.name}: {dtype} conversion overflow; choose BF16 or auto')
-                fragment.write(tensor_to_bytes(converted))
-            del flat
-        spool.append(meta.name, dtype, meta.shape, fragment)
+            step = min(budget, 1 << 20)
+            for offset in range(0, len(data), step):
+                yield data[offset:offset + step]
+            return
+        flat = reader.read_tensor(meta.name).reshape(-1)
+        step = max(1, budget // 32)
+        for start in range(0, flat.numel(), step):
+            source = flat[start:start + step]
+            converted = source.to(dtype)
+            if not torch.isfinite(converted.float()).all() and torch.isfinite(source.float()).all():
+                raise QualityGateError(f'{meta.name}: {dtype} conversion overflow; choose BF16 or auto')
+            yield tensor_to_bytes(converted)
+    spool.append_chunks(meta.name, dtype, meta.shape, chunks())

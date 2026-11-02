@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Remove the optional Textual frontend (Quantizer Studio); the CLI and the
+  Python API are the only interfaces.
+- Speed up conversion I/O without changing output bytes: hash source shards in
+  parallel, overlap native source hashing with encoding, copy payloads in the
+  kernel, write passthrough tensors straight to the spool, compute the final
+  output digest alongside the payload re-check, and drop an unused full-output
+  hash in the planned engine. W4A8 codebook search uses int32 indices.
+
 - Add native Fibo2/MOSS-Image policies and correct fused Ming attention, nested
   Qwen encoder detection and Trellis2/Pixal3D block selection.
 - Add exact, offline Comfy-Org reference recipes with per-layer 16/64/256

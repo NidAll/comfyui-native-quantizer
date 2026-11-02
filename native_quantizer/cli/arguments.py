@@ -211,7 +211,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--json-log", metavar="PATH", default=None,
                    help="also emit structured JSON log lines to PATH")
     p.add_argument("--events-jsonl", metavar="PATH", default=None,
-                   help="write quantizer-events/v1 JSON lines for local frontends")
+                   help="write quantizer-events/v1 JSON lines for scripts and monitors")
     p.add_argument("--trust-pickle", action="store_true",
                    help="allow deserializing pickle-based checkpoints (unsafe for "
                         "untrusted files)")

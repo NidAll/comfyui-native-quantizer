@@ -43,7 +43,7 @@ python scripts/check_distributions.py /path/to/release-artifacts
 
 The build creates a source archive and builds its wheel from that archive.
 Archive checks verify package identity, complete license, resources, payload
-privacy and frontend isolation, then generate `SHA256SUMS`. Confirm changed
+privacy and wheel contents, then generate `SHA256SUMS`. Confirm changed
 source files are present byte-for-byte. The source archive includes the tests,
 CLI guides and scripts needed to reproduce validation.
 

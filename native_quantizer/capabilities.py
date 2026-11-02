@@ -1,4 +1,4 @@
-"""Machine-readable conversion capabilities shared by optional frontends."""
+"""Machine-readable conversion capabilities reported by --diagnose."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from native_quantizer.identity import FORMAT_W4A8, FORMAT_W6A8, MIXED_PROFILES
 
 
 def frontend_capabilities() -> Dict[str, Any]:
-    """Capabilities for optional local frontends; CLI policies stay authoritative."""
+    """Format/engine capabilities for tooling; CLI policies stay authoritative."""
     formats = {
         'w4a8': {'algorithm': FORMAT_W4A8, 'engine': 'mixed', 'resume': True,
                  'description': 'Kitchen W4A8',

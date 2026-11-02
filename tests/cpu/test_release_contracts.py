@@ -17,7 +17,6 @@ class ReleaseContracts(unittest.TestCase):
         from native_quantizer.identity import get_converter_version
         core = (ROOT / 'pyproject.toml').read_text()
         self.assertEqual(re.search(r'^version = "([^"]+)"', core, re.M)[1], get_converter_version())
-        self.assertNotIn('textual', core)
 
     def test_missing_requested_consumer_is_an_error(self):
         with patch.dict(os.environ, {}, clear=True):

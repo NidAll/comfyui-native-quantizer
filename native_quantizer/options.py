@@ -1,4 +1,4 @@
-"""Conversion requests independent of argparse and optional frontend state."""
+"""Conversion requests independent of argparse."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields

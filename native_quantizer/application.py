@@ -42,6 +42,7 @@ from native_quantizer.errors import (
 from native_quantizer.execution.mixed import ConversionEngine
 from native_quantizer.execution.native import convert_native
 from native_quantizer.files import (
+    BackgroundDigest,
     _atomic_write_json,
     _fsync_parent,
     _publish_output,
@@ -205,6 +206,16 @@ def _check_runtime_compatibility(env: EnvironmentInfo,
             "per-format runtime-contract validators only")
 
 
+_PLANNED_FORMATS = {"w4a8": FORMAT_W4A8, "w6a8": FORMAT_W6A8, "mixed": FORMAT_MIXED}
+
+
+def _planned_format(name: str, argument_error: Callable[[str], None]) -> Optional[str]:
+    fmt = _PLANNED_FORMATS.get(name)
+    if fmt is None:
+        argument_error(f"--format must be w4a8, w6a8 or mixed, got {name!r}")
+    return fmt
+
+
 def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
                    argument_error: Optional[Callable[[str], None]] = None) -> int:
     args = dataclasses.replace(options)
@@ -240,14 +251,12 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         if value is not None and (not math.isfinite(value)
                                   or not 0.0 <= value <= 1.0):
             raise UsageError(f"{option} must be a finite number in [0, 1]")
-    events.emit("phase", phase="inspection")
+    # Events stay disabled until prepare_event_stream knows the source shards.
     info = discover_checkpoint(args.model, trust_pickle=args.trust_pickle,
                                allow_extra_shard_tensors=
                                args.allow_extra_shard_tensors)
     args._max_output_bytes = (int(sum(os.path.getsize(path) for path in info.files) / args.target_compression)
                               if getattr(args, 'target_compression', None) else None)
-    events.emit("source", files=len(info.files), tensors=len(info.tensors),
-                       bytes=info.total_bytes, quantized=info.is_quantized_input)
     apply_key_mapping(info, args.key_map)
     warnings.extend(info.input_warnings)
     _validate_destination_paths(info, args)
@@ -347,14 +356,7 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     if args.validation_only:
         if not args.output or not os.path.exists(args.output):
             argument_error("--validation-only requires an existing --output file")
-        if args.format == "w4a8":
-            fmt = FORMAT_W4A8
-        elif args.format == "w6a8":
-            fmt = FORMAT_W6A8
-        elif args.format == "mixed":
-            fmt = FORMAT_MIXED
-        else:
-            argument_error(f"--format must be w4a8, w6a8 or mixed, got {args.format!r}")
+        fmt = _planned_format(args.format, argument_error)
         plan = plan_from_output(args.output, detection, fmt, info)
         with RawSafetensorsFile(args.output) as raw:
             record = json.loads(raw.metadata.get(METADATA_KEY_EXT, '{}')).get('optimization')
@@ -381,14 +383,7 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         _write_reports(args, report)
         return 0 if summary["n_failed"] == 0 else 2
 
-    if args.format == "w4a8":
-        fmt = FORMAT_W4A8
-    elif args.format == "w6a8":
-        fmt = FORMAT_W6A8
-    elif args.format == "mixed":
-        fmt = FORMAT_MIXED
-    else:
-        argument_error(f"--format must be w4a8, w6a8 or mixed, got {args.format!r}")
+    fmt = _planned_format(args.format, argument_error)
 
     if fmt == FORMAT_W6A8 or args.enable_w6a8:
         require_w6a8_api()
@@ -864,6 +859,9 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     # requested output (including an existing --overwrite target).
     republish_with_metadata(staged_path, validation_path, qm_meta, entries)
 
+    # The publication digest reads the same private candidate as the payload
+    # re-check below, so both run concurrently.
+    output_digest = BackgroundDigest(sha256_file, validation_path)
     final_ok = False
     try:
         with RawSafetensorsFile(validation_path) as final_raw:
@@ -886,6 +884,7 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
     events.emit("validation", ok=final_ok and not summary.get("n_failed", 0),
                        checks=len(summary.get("checks", [])))
     if not final_ok:
+        output_digest.cancel()
         warnings.append(
             "final checkpoint candidate failed integrity checks; requested output "
             "was not replaced")
@@ -898,11 +897,12 @@ def run_conversion(options: ConversionOptions, env: EnvironmentInfo,
         return 2
 
     if args._max_output_bytes is not None and os.path.getsize(validation_path) > args._max_output_bytes:
+        output_digest.cancel()
         raise CompressionGateError(
             f'whole-file compression gate failed: {os.path.getsize(validation_path)} bytes exceeds '
             f'{args._max_output_bytes}; metadata and protected tensors are included; output was not replaced')
     events.emit("phase", phase="publication")
-    output_sha = sha256_file(validation_path)
+    output_sha = output_digest.result()
     _publish_output(validation_path, out_path,
                     overwrite=bool(args.overwrite),
                     expected_identity=expected_dest_identity)

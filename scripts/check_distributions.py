@@ -53,17 +53,13 @@ def main() -> int:
             assert Path(file).name != 'AGENTS.md', file
             assert '__pycache__' not in Path(file).parts, file
             assert not {'build', 'dist'}.intersection(Path(file).parts), file
-            assert not file.startswith('quantizer_tui/'), file
-            assert Path(file).name not in {'requirements-tui.txt', 'test_quantizer_tui.py'}, file
             if file.endswith(('.py', '.md', '.toml', '.json', '.yaml', '.yml')):
                 assert not PRIVATE.search(payload), f'{file}: private checkout or hardware identity'
         if name == 'comfyui-native-quantizer':
             assert 'native_quantizer/testing/fixtures/v1.blob.txt' in files
             assert 'native_quantizer/cli/entrypoint.py' in files
             if is_wheel:
-                assert not any(file.startswith('quantizer_tui/') for file in files)
                 assert not any(file.startswith('tests/') for file in files)
-                assert not any('textual' in dep for dep in metadata.get_all('Requires-Dist', []))
             else:
                 for required in ('scripts/install_linux.py', 'scripts/check.py', 'scripts/smoke_installed.py',
                                  'docs/support.md', 'docs/releasing.md', 'tests/cpu/test_project_structure.py',

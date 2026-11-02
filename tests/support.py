@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 
 def isolated_module() -> None:
-    """Never read or write the developer's CLI or Studio preferences."""
+    """Never read or write the developer's CLI preferences."""
     directory = tempfile.TemporaryDirectory(prefix='quantizer-tests-')
     unittest.addModuleCleanup(directory.cleanup)
     root = Path(directory.name)

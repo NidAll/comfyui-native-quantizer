@@ -21,7 +21,7 @@ integration fails when its consumer, CUDA backend or required Kitchen API is
 missing. Checks do not launch services or download model weights.
 
 Read [module ownership](docs/architecture.md) before implementation changes.
-Keep library imports independent of the CLI and optional frontends. Preserve
+Keep library imports independent of the CLI. Preserve
 native layouts, protected precision, bounded work, quality gates, input identity,
 resume integrity and atomic publication. Keep reference reconstruction separate
 from production encoding. Add focused regressions for changed behavior under `tests/cpu/` or

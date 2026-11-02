@@ -1,4 +1,4 @@
-"""Stable operations for Python callers and optional frontends.
+"""Stable operations for Python callers.
 
 Importing this module does not initialize PyTorch, checkpoints or regression
 fixtures. Computation dependencies are loaded when an operation is requested.
@@ -9,7 +9,7 @@ from native_quantizer.options import ConversionOptions, validate_conversion_opti
 
 
 def local_defaults() -> dict:
-    """Read local CLI/frontend preferences without importing compute libraries."""
+    """Read local CLI preferences without importing compute libraries."""
     from native_quantizer.config import load_defaults
     return load_defaults()
 
@@ -34,7 +34,7 @@ def convert(options: ConversionOptions) -> int:
 
 
 def run_cli(argv: list[str]) -> int:
-    """Execute a recorded CLI command in a frontend's isolated worker."""
+    """Run one CLI command in this process and return its exit code."""
     from native_quantizer.cli.commands import main
     return main(argv)
 

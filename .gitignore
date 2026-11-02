@@ -30,8 +30,3 @@ README_quantizer_legacy.md
 
 # Local workspace instructions contain private checkout paths
 AGENTS.md
-
-# Deferred local frontend: excluded from the CLI release and GitHub snapshot
-quantizer_tui/
-requirements-tui.txt
-test_quantizer_tui.py
