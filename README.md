@@ -165,7 +165,6 @@ tests/            Regression suites (cpu/, cuda/) and shared support
 scripts/          Checks, installed smoke, benchmarks and Linux setup
 docs/             Usage, numerical contracts, support and release guides
 docs/models/      Architecture-specific conversion guides
-skills/           Architecture contributor workflow
 .github/          CI and contribution templates
 ```
 

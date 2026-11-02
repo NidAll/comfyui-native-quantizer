@@ -3,6 +3,5 @@ recursive-include tests *.py
 recursive-include docs *.md
 recursive-include scripts *.py
 recursive-include .github *.yml *.yaml *.md
-recursive-include skills *.md *.yaml
 exclude AGENTS.md
 global-exclude __pycache__ *.py[cod] *.log *.safetensors *.ckpt *.pt *.pth *.bin *.gguf
